@@ -170,19 +170,66 @@ __global__ void computeCov2DCUDA(int P,
 	float3 dL_dconic = { dL_dconics[4 * idx], dL_dconics[4 * idx + 1], dL_dconics[4 * idx + 3] };
 	float3 t = transformPoint4x3(mean, view_matrix);
 	
-	const float limx = 1.3f * tan_fovx;
-	const float limy = 1.3f * tan_fovy;
-	const float txtz = t.x / t.z;
-	const float tytz = t.y / t.z;
-	t.x = min(limx, max(-limx, txtz)) * t.z;
-	t.y = min(limy, max(-limy, tytz)) * t.z;
+	// const float limx = 1.3f * tan_fovx;
+	// const float limy = 1.3f * tan_fovy;
+	// const float txtz = t.x / t.z;
+	// const float tytz = t.y / t.z;
+	// t.x = min(limx, max(-limx, txtz)) * t.z;
+	// t.y = min(limy, max(-limy, tytz)) * t.z;
 	
-	const float x_grad_mul = txtz < -limx || txtz > limx ? 0 : 1;
-	const float y_grad_mul = tytz < -limy || tytz > limy ? 0 : 1;
+	const float x_grad_mul = 1; // txtz < -limx || txtz > limx ? 0 : 1;
+	const float y_grad_mul = 1; // tytz < -limy || tytz > limy ? 0 : 1;
+	const float z_grad_mul = 1;
 
-	glm::mat3 J = glm::mat3(h_x / t.z, 0.0f, -(h_x * t.x) / (t.z * t.z),
-		0.0f, h_y / t.z, -(h_y * t.y) / (t.z * t.z),
-		0, 0, 0);
+	// glm::mat3 J = glm::mat3(h_x / t.z, 0.0f, -(h_x * t.x) / (t.z * t.z),
+	// 	0.0f, h_y / t.z, -(h_y * t.y) / (t.z * t.z),
+	// 	0, 0, 0);
+
+	float dis_inv = 1.0f / (sqrt(t.x * t.x + t.y * t.y + t.z * t.z) + 0.0000001f);
+
+	const float fx = max(512.f, h_x);
+	const float fy = max(512.f, h_y);
+
+	float3 mu = { t.x * dis_inv, t.y * dis_inv, t.z * dis_inv};
+
+	float mut_xyz = mu.x * t.x + mu.y * t.y + mu.z * t.z;
+	float mut_xyz2 = mut_xyz * mut_xyz;
+	float mut_xyz2_inv = 1.0f / (mut_xyz2 + 0.0000001f);
+
+	float theta = atan2(-mu.y, sqrt(mu.x * mu.x + mu.z * mu.z)); 
+	float phi = atan2(mu.x, mu.z);
+	
+	float sin_phi = sin(phi);
+	float cos_phi = cos(phi);
+
+	float sin_theta = sin(theta);
+	float cos_theta = cos(theta);
+
+	glm::mat3 J = glm::mat3(
+		fx * (
+			(mu.x * t.z * sin_phi + mu.y * t.y * cos_phi + mu.z * t.z * cos_phi) * mut_xyz2_inv
+		),
+		fx * (
+			(mu.y * (-t.x * cos_phi + t.z * sin_phi)) * mut_xyz2_inv
+		),
+		fx * (
+			-(mu.x * t.x * sin_phi + mu.y * t.y * sin_phi + mu.z * t.x * cos_phi) * mut_xyz2_inv
+		),
+
+		fy * (
+			(-mu.x * t.y * cos_theta - mu.x * t.z * sin_theta * cos_phi + mu.y * t.y * sin_phi * sin_theta + mu.z * t.z * sin_phi * sin_theta) * mut_xyz2_inv
+		),
+		fy * (
+			(mu.x * t.x * cos_theta - mu.y * t.x * sin_phi * sin_theta - mu.y * t.z * sin_theta * cos_phi + mu.z * t.z * cos_theta) * mut_xyz2_inv
+		),
+		fy * (
+			(mu.x * t.x * sin_theta * cos_phi + mu.y * t.y * sin_theta * cos_phi - mu.z * t.x * sin_phi * sin_theta - mu.z * t.y * cos_theta) * mut_xyz2_inv
+		),
+
+		0.0f,
+		0.0f,
+		0.0f
+	);
 
 	glm::mat3 W = glm::mat3(
 		view_matrix[0], view_matrix[4], view_matrix[8],
@@ -292,14 +339,74 @@ __global__ void computeCov2DCUDA(int P,
 	float dL_dJ11 = W[1][0] * dL_dT10 + W[1][1] * dL_dT11 + W[1][2] * dL_dT12;
 	float dL_dJ12 = W[2][0] * dL_dT10 + W[2][1] * dL_dT11 + W[2][2] * dL_dT12;
 
-	float tz = 1.f / t.z;
-	float tz2 = tz * tz;
-	float tz3 = tz2 * tz;
+	// float tz = 1.f / t.z;
+	// float tz2 = tz * tz;
+	// float tz3 = tz2 * tz;
 
-	// Gradients of loss w.r.t. transformed Gaussian mean t
-	float dL_dtx = x_grad_mul * -h_x * tz2 * dL_dJ02;
-	float dL_dty = y_grad_mul * -h_y * tz2 * dL_dJ12;
-	float dL_dtz = -h_x * tz2 * dL_dJ00 - h_y * tz2 * dL_dJ11 + (2 * h_x * t.x) * tz3 * dL_dJ02 + (2 * h_y * t.y) * tz3 * dL_dJ12;
+	// // Gradients of loss w.r.t. transformed Gaussian mean t
+	// float dL_dtx = x_grad_mul * -h_x * tz2 * dL_dJ02;
+	// float dL_dty = y_grad_mul * -h_y * tz2 * dL_dJ12;
+	// float dL_dtz = -h_x * tz2 * dL_dJ00 - h_y * tz2 * dL_dJ11 + (2 * h_x * t.x) * tz3 * dL_dJ02 + (2 * h_y * t.y) * tz3 * dL_dJ12;
+
+	float dL_dJ01 = W[1][0] * dL_dT00 + W[1][1] * dL_dT01 + W[1][2] * dL_dT02;
+ 	float dL_dJ10 = W[0][0] * dL_dT10 + W[0][1] * dL_dT11 + W[0][2] * dL_dT12;
+
+
+	// float tz = 1.f / t.z;
+	// float tz2 = tz * tz;
+	// float tz3 = tz2 * tz;
+
+	// // Gradients of loss w.r.t. transformed Gaussian mean t
+	// float dL_dtx = x_grad_mul * -h_x * tz2 * dL_dJ02;
+	// float dL_dty = y_grad_mul * -h_y * tz2 * dL_dJ12;
+	// float dL_dtz = -h_x * tz2 * dL_dJ00 - h_y * tz2 * dL_dJ11 + (2 * h_x * t.x) * tz3 * dL_dJ02 + (2 * h_y * t.y) * tz3 * dL_dJ12;
+	
+	float x2 = t.x * t.x;
+	float y2 = t.y * t.y;
+	float z2 = t.z * t.z;
+
+
+	float j00_x = fx * t.x * t.z * (-2.f * x2 - y2 - 2.f * z2) 
+			/ pow(x2 + z2, 1.5f) / pow(x2 + y2 + z2, 1.5f);
+	float j01_x = 0.0f;
+	float j02_x = fx * (x2 * x2 - y2 * z2 - z2 * z2) 
+				/ pow(x2 + z2, 0.5f) / pow(x2 + y2 + z2, 0.5f) / (x2 * x2 + x2 * y2 + 2.0f * x2 * z2 + y2 * z2 + z2 * z2);
+	float j10_x = fy * t.y * (2.f * x2 * x2 + x2 * z2 - y2 * z2 - z2 * z2) 
+					/ pow(x2 + z2, 0.5f) / (x2 * x2 * x2 + 2.f * x2 * x2 * y2 + 3. * x2 * x2 * z2 + x2 * y2 * y2 + 4.f * x2 * y2 * z2 + 3.f * x2 * z2 * z2 + y2 * y2 * z2 + 2.f * y2 * z2 * z2 + z2 * z2 * z2);
+	float j11_x = fy * t.x * (-x2 + y2 - z2) 
+					/ pow(x2 + z2, 0.5f) / (x2 * x2 + 2.f * x2 * y2 + 2.f * x2 * z2 + y2 * y2 + 2.f * y2 * z2 + z2 * z2);
+	float j12_x = fy * t.x * t.y * t.z * (2.f * y2 * (x2 * z2) + y2 * (x2 + y2 + z2) + 2.f * pow(x2 + z2, 2.f) + (x2 + z2) * (x2 + y2 + z2)) 
+				/ pow(x2 + z2, 1.5f) / pow(x2 + y2 + z2, 3.f);
+
+	float j00_y = -fx * t.y * t.z 
+				/ pow(x2 + z2, 0.5f) / pow(x2 + y2 + z2, 1.5f);
+	float j01_y = 0.0f;
+	float j02_y = fx * t.x * t.y 
+				/ pow(x2 + z2, 0.5f) / pow(x2 + y2 + z2, 1.5f);
+	float j10_y = fy * t.x * (-x2 + y2 - z2) 
+					/ pow(x2 + z2, 0.5f) / (x2 * x2 + 2.f * x2 * y2 + 2.f * x2 * z2 + y2 * y2 + 2.f * y2 * z2 + z2 * z2);
+	float j11_y = -2.f * fy * t.y * pow(x2 + z2, 0.5f) /
+					(x2 * x2 + 2.f * x2 * y2 + 2.f * x2 * z2 + y2 * y2 + 2.f * y2 * z2 + z2 * z2);
+	float j12_y = fy * t.z * (-x2 + y2 - z2) 
+					/ pow(x2 + z2, 0.5f) / (x2 * x2 + 2.f * x2 * y2 + 2.f * x2 * z2 + y2 * y2 + 2.f * y2 * z2 + z2 * z2);
+	
+	float j00_z = fx * (x2 * x2 + x2 * y2 - z2 * z2) 
+				/ pow(x2 + z2, 0.5f) / pow(x2 + y2 + z2, 0.5f) / (x2 * x2 + x2 * y2 + 2.f * x2 * z2 + y2 * z2 + z2 * z2);
+	float j01_z = 0.0f;
+	float j02_z = fx * t.x * t.z * (2.f * x2 + y2 + 2.f * z2) 
+			/ pow(x2 + z2, 1.5f) / pow(x2 + y2 + z2, 1.5f);
+	float j10_z = fy * t.x * t.y * t.z * (2.f * y2 * (x2 + z2) + y2 * (x2 + y2 + z2) + 2.f * pow(x2 + z2, 2.f) + (x2 + z2) * (x2 + y2 + z2)) 
+				/ pow(x2 + z2, 1.5f) / pow(x2 + y2 + z2, 3.f);
+	float j11_z = fy * t.z * (-x2 + y2 - z2) 
+				/ pow(x2 + z2, 0.5f) / (x2 * x2 + 2.f * x2 * y2 + 2.f * x2 * z2 + y2 * y2 + 2.f * y2 * z2 + z2 * z2);
+	float j12_z = fy * t.y * (-x2 * x2 - x2 * y2 + x2 * z2 + 2.f * z2 * z2)
+				/ pow(x2 + z2, 0.5f) / (x2 * x2 * x2 + 2.f * x2 * x2 * y2 + 3.f * x2 * x2 * z2 + x2 * y2 * y2 + 4.f * x2 * y2 * z2 + 3.f * x2 * z2 * z2 + y2 * y2 * z2 + 2.f * y2 * z2 * z2 + z2 * z2 * z2);
+
+
+	float dL_dtx = x_grad_mul * (j00_x * dL_dJ00 + j01_x * dL_dJ01 + j02_x * dL_dJ02 + j10_x * dL_dJ10 + j11_x * dL_dJ11 + j12_x * dL_dJ12);
+	float dL_dty = y_grad_mul * (j00_y * dL_dJ00 + j01_y * dL_dJ01 + j02_y * dL_dJ02 + j10_y * dL_dJ10 + j11_y * dL_dJ11 + j12_y * dL_dJ12);
+	float dL_dtz = z_grad_mul * (j00_z * dL_dJ00 + j01_z * dL_dJ01 + j02_z * dL_dJ02 + j10_z * dL_dJ10 + j11_z * dL_dJ11 + j12_z * dL_dJ12);
+
 
 	// Account for transformation of mean to t
 	// t = transformPoint4x3(mean, view_matrix);
@@ -450,7 +557,8 @@ renderCUDA(
 	float3* __restrict__ dL_dmean2D,
 	float4* __restrict__ dL_dconic2D,
 	float* __restrict__ dL_dopacity,
-	float* __restrict__ dL_dcolors)
+	float* __restrict__ dL_dcolors,
+	float focal_x, float focal_y)
 {
 	// We rasterize again. Compute necessary block info.
 	auto block = cg::this_thread_block();
@@ -495,8 +603,38 @@ renderCUDA(
 
 	// Gradient of pixel coordinate w.r.t. normalized 
 	// screen-space viewport corrdinates (-1 to 1)
-	const float ddelx_dx = 0.5 * W;
-	const float ddely_dy = 0.5 * H;
+	const float cx = 0.5 * W - 0.5;
+	const float cy = 0.5 * H - 0.5;
+	const float inv_x = 1.0f / focal_x;
+	const float inv_y = 1.0f / focal_y;
+	const float f_x = focal_x;
+	const float f_y = focal_y;
+	const float hw = 0.5 * W;
+	const float hh = 0.5 * H;
+	const float tan_fovx = hw * inv_x;
+	const float tan_fovy = hh * inv_y;
+
+	// add for min error
+	float3 t = {
+		(pixf.x - cx) * inv_x,
+		(pixf.y - cy) * inv_y,
+		1
+	};
+
+	float theta = atan2(-t.y, sqrt(t.x * t.x + t.z * t.z)); 
+	float phi = atan2(t.x, t.z);
+			
+	float sin_phi = sin(phi);
+	float cos_phi = cos(phi);
+
+	float sin_theta = sin(theta);
+	float cos_theta = cos(theta);
+
+	t = {
+		cos_theta * sin_phi,
+		-sin_theta,
+		cos_theta * cos_phi
+	};
 
 	// Traverse all Gaussians
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
@@ -527,7 +665,45 @@ renderCUDA(
 
 			// Compute blending values, as before.
 			const float2 xy = collected_xy[j];
-			const float2 d = { xy.x - pixf.x, xy.y - pixf.y };
+			// const float2 d = { xy.x - pixf.x, xy.y - pixf.y };
+
+			float3 mu = {
+				(xy.x - cx) * inv_x,
+				(xy.y - cy) * inv_y,
+				1
+			};
+
+			theta = atan2(-mu.y, sqrt(mu.x * mu.x + mu.z * mu.z)); 
+			phi = atan2(mu.x, mu.z);
+			
+			sin_phi = sin(phi);
+			cos_phi = cos(phi);
+
+			sin_theta = sin(theta);
+			cos_theta = cos(theta);
+
+			mu = {
+				cos_theta * sin_phi,
+				-sin_theta,
+				cos_theta * cos_phi
+			};
+
+			if (mu.x * t.x + mu.y * t.y + mu.z * t.z < 0.0000001f)  // 0.0000001f
+			{
+				continue;
+			}
+
+			float u_xy = 0.0f;
+			float v_xy = 0.0f;
+
+			const float uv_pixf = (mu.x * t.x + mu.y * t.y + mu.z * t.z);
+			const float uv_pixf_inv = 1.f / uv_pixf;
+
+			float u_pixf = max(512.f, focal_x) * (t.x * cos_phi - t.z * sin_phi) * uv_pixf_inv;
+			float v_pixf = max(512.f, focal_y) * (t.x * sin_phi * sin_theta + t.y * cos_theta + t.z * sin_theta * cos_phi) * uv_pixf_inv;
+
+			float2 d = { u_xy - u_pixf, v_xy - v_pixf }; 
+
 			const float4 con_o = collected_conic_opacity[j];
 			const float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
 			if (power > 0.0f)
@@ -579,9 +755,51 @@ renderCUDA(
 			const float dG_ddelx = -gdx * con_o.x - gdy * con_o.y;
 			const float dG_ddely = -gdy * con_o.z - gdx * con_o.y;
 
+
+			const float x = (xy.x - cx) * inv_x;
+			const float y = (xy.y - cy) * inv_y;
+
+			const float tx = t.x;
+			const float ty = t.y;
+
+			const float tx2 = tx * tx;
+			const float ty2 = ty * ty;
+			const float x2 = x * x;
+			const float y2 = y * y;
+
+			const float x2_1 = x2 + 1;
+			const float x2_y2_1 = x2_1 + y * y;
+			const float txx_1 = tx * x + 1;
+			const float txx_tyy_1 = txx_1 + ty * y;
+			const float tmp1 = - tx * (x2_y2_1) + x * (txx_tyy_1);
+
+			const float x2_1_pow1_5 = pow(x2_1, 1.5);
+			const float txx_tyy_1_pow2 = pow(txx_tyy_1, 2);
+			const float x2_y2_1_pow0_5 = sqrt(x2_y2_1);
+			const float x2_1_pow0_5 = sqrt(x2_1);
+
+			const float inv_x2_1_pow1_5 = 1.0f / x2_1_pow1_5;
+			const float inv_x2_1_pow0_5 = 1.0f / x2_1_pow0_5;
+			const float inv_txx_tyy_1_pow2 = 1.0f / txx_tyy_1_pow2;
+			const float inv_x2_y2_1_pow0_5 = 1.0f / x2_y2_1_pow0_5;
+			
+
+			const float ddelx_dx = f_x * (- (tx - x) * (x2_1) * (tmp1) + (x2_y2_1) * (txx_1) * (txx_tyy_1))
+									* inv_x2_1_pow1_5 * inv_txx_tyy_1_pow2 * inv_x2_y2_1_pow0_5;
+			const float ddely_dx = f_y * ((x2_1) * (tmp1) * (- ty * (x2_1) + y * (txx_1)) - (txx_tyy_1) * (- ty * x * pow(x2_1, 2) + x * y * (x2_1) * (txx_1) + x * y * (txx_1) * (x2_y2_1) + (x2_1) * (- tx * y + ty * x) * (x2_y2_1))) 
+									* inv_x2_1_pow1_5 * inv_txx_tyy_1_pow2 / ((x2_y2_1));
+			const float ddelx_dy = f_x * (tx - x) * (ty * (x2_y2_1) - y * (txx_tyy_1)) 
+									* inv_x2_1_pow0_5 * inv_txx_tyy_1_pow2 * inv_x2_y2_1_pow0_5;
+			const float ddely_dy = f_y * (tx2 * x2 + 2 * tx * x + ty2 * x2 + ty2 + 1) 
+									* inv_x2_1_pow0_5 / ((tx2 * x2 + 2 * tx * ty * x * y + 2 * tx * x + ty2 * y2 + 2 * ty * y + 1));
+
+
+
 			// Update gradients w.r.t. 2D mean position of the Gaussian
-			atomicAdd(&dL_dmean2D[global_id].x, dL_dG * dG_ddelx * ddelx_dx);
-			atomicAdd(&dL_dmean2D[global_id].y, dL_dG * dG_ddely * ddely_dy);
+			// atomicAdd(&dL_dmean2D[global_id].x, dL_dG * dG_ddelx * ddelx_dx);
+			// atomicAdd(&dL_dmean2D[global_id].y, dL_dG * dG_ddely * ddely_dy);
+			atomicAdd(&dL_dmean2D[global_id].x, dL_dG * (dG_ddelx * ddelx_dx + dG_ddely * ddely_dx) * tan_fovx);
+			atomicAdd(&dL_dmean2D[global_id].y, dL_dG * (dG_ddelx * ddelx_dy + dG_ddely * ddely_dy) * tan_fovy);
 
 			// Update gradients w.r.t. 2D covariance (2x2 matrix, symmetric)
 			atomicAdd(&dL_dconic2D[global_id].x, -0.5f * gdx * d.x * dL_dG);
@@ -686,7 +904,9 @@ void BACKWARD::render(
 	float3* dL_dmean2D,
 	float4* dL_dconic2D,
 	float* dL_dopacity,
-	float* dL_dcolors)
+	float* dL_dcolors,
+	float focal_x, float focal_y,
+	const float* viewmatrix)
 {
 	#define CALL_KBUFFER(WINDOW) renderkBufferBackwardCUDA<NUM_CHANNELS, WINDOW> << <grid, block >> > (ranges, point_list, W, H, means2D, cov3D_inv, projmatrix_inv, (float3*)cam_pos, colors, conic_opacity, final_Ts, n_contrib, bg_color, pixel_colors, dL_dpixels, dL_dmean2D, dL_dconic2D, dL_dopacity, dL_dcolors)
 
@@ -706,7 +926,8 @@ void BACKWARD::render(
 			dL_dmean2D,
 			dL_dconic2D,
 			dL_dopacity,
-			dL_dcolors
+			dL_dcolors,
+			focal_x, focal_y
 			);
 	}
 	else if (sort_settings.sort_mode == SortMode::PER_PIXEL_KBUFFER)
@@ -739,7 +960,7 @@ void BACKWARD::render(
 #define CALL_HIER(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE) \
 	sortGaussiansRayHierarchicalCUDA_backward<NUM_CHANNELS, HEAD_QUEUE_SIZE, MID_QUEUE_SIZE, HIER_CULLING><<<grid, {16, 4, 4}>>>( \
 		ranges, point_list, W, H, bg_color, means2D, cov3D_inv, projmatrix_inv, (float3*) cam_pos, conic_opacity, \
-		colors, final_Ts, n_contrib, pixel_colors, dL_dpixels, dL_dmean2D, dL_dconic2D, dL_dopacity, dL_dcolors)
+		colors, final_Ts, n_contrib, pixel_colors, dL_dpixels, dL_dmean2D, dL_dconic2D, dL_dopacity, dL_dcolors, focal_x, focal_y, viewmatrix)
 
 #define CALL_HIER_HEAD(HIER_CULLING, MID_QUEUE_SIZE) \
 	switch (sort_settings.queue_sizes.per_pixel) \

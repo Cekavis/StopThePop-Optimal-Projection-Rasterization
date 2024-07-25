@@ -88,7 +88,9 @@ namespace FORWARD
 		uint32_t* n_contrib,
 		const float* bg_color,
 		DebugVisualizationData& debugVisualization,
-		float* out_color);
+		float* out_color,
+		float focal_x, float focal_y,
+		const float* viewmatrix);
 
 	void render_debug(DebugVisualizationData& debugVisualization, int P, float* out_color, float* min_max_contrib);
 

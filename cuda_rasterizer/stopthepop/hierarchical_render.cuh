@@ -218,7 +218,9 @@ __device__ void sortGaussiansRayHierarchicaEvaluation(
 	PF && prep_function,
 	SF && store_function,
 	BF && blend_function,
-	FF && fin_function)
+	FF && fin_function,
+	float focal_x, float focal_y,
+	const float* __restrict__ viewmatrix)
 {
 #if (DEBUG_HIERARCHICAL & 0x100) != 0
 	//if (blockIdx.x != 7 || blockIdx.y != 7)
@@ -418,6 +420,32 @@ __device__ void sortGaussiansRayHierarchicaEvaluation(
 
 
 
+	// It needs to correspond to fx, fy in the function computeCov2D.
+	const float fx = max(512.f, focal_x);
+	const float fy = max(512.f, focal_y);
+
+	// Generate rays based on pixels (transformation from image space to ray space).
+	// modify to adapt to various camera models (here is for the pinhole camera)
+	glm::vec3 p_world = pix2world(glm::vec2((float)pixpos.x, (float)pixpos.y), W, H, inverse_vp);
+	float3 t = transformPoint4x3({p_world.x, p_world.y, p_world.z}, viewmatrix);
+	
+	// Normalize the ray direction vector.
+	float theta = atan2(-t.y, sqrt(t.x * t.x + t.z * t.z)); 
+	float phi = atan2(t.x, t.z);
+			
+	float sin_phi = sin(phi);
+	float cos_phi = cos(phi);
+
+	float sin_theta = sin(theta);
+	float cos_theta = cos(theta);
+
+	t = {
+		cos_theta * sin_phi,
+		-sin_theta,
+		cos_theta * cos_phi
+	};
+
+
 	auto front4OneFromMid = [&](bool checkvalid)
 		{
 			if (head_group.any(active))
@@ -490,7 +518,43 @@ __device__ void sortGaussiansRayHierarchicaEvaluation(
 
 					blend_data.contributor++;
 
-					float2 d = { xy.x - static_cast<float>(pixpos.x), xy.y - static_cast<float>(pixpos.y) };
+
+					// Compute the tangent plane coordinates of the 2D Gaussian mean.
+					p_world = pix2world(glm::vec2(xy.x, xy.y), W, H, inverse_vp);
+					float3 mu = transformPoint4x3({p_world.x, p_world.y, p_world.z}, viewmatrix);
+
+					theta = atan2(-mu.y, sqrt(mu.x * mu.x + mu.z * mu.z)); 
+					phi = atan2(mu.x, mu.z);
+					
+					sin_phi = sin(phi);
+					cos_phi = cos(phi);
+
+					sin_theta = sin(theta);
+					cos_theta = cos(theta);
+
+					mu = {
+						cos_theta * sin_phi,
+						-sin_theta,
+						cos_theta * cos_phi
+					};
+
+					// Determine whether the Gaussian mean and the pixel ray are in the same hemisphere.
+					if (mu.x * t.x + mu.y * t.y + mu.z * t.z < 0.0000001f)  // 0.0000001f
+					{
+						continue;
+					}
+
+					float u_xy = 0.0f;
+					float v_xy = 0.0f;
+
+					float uv_pixf_inv = 1.f / (mu.x * t.x + mu.y * t.y + mu.z * t.z);
+
+					float u_pixf = fx * (t.x * cos_phi - t.z * sin_phi) * uv_pixf_inv;
+					float v_pixf = fy * (t.x * sin_phi * sin_theta + t.y * cos_theta + t.z * sin_theta * cos_phi) * uv_pixf_inv;
+
+					float2 d = { u_xy - u_pixf, v_xy - v_pixf }; 
+
+					// float2 d = { xy.x - static_cast<float>(pixpos.x), xy.y - static_cast<float>(pixpos.y) };
 
 					float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
 					if (power > 0.0f)
@@ -951,7 +1015,9 @@ __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_forw
 	uint32_t* __restrict__ n_contrib,
 	const float* __restrict__ bg_color,
 	DebugVisualization debugType,
-	float* __restrict__ out_color)
+	float* __restrict__ out_color,
+	float focal_x, float focal_y,
+	const float* __restrict__ viewmatrix)
 {
 	// int num_blends = 0;
 	struct BlendDataRaw
@@ -1031,7 +1097,7 @@ __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_forw
 
 	sortGaussiansRayHierarchicaEvaluation<HEAD_WINDOW, MID_WINDOW, CULL_ALPHA>(
 		ranges, point_list, W, H, points_xy_image, cov3Ds_inv, projmatrix_inv, cam_pos, conic_opacity, debugType,
-		prep_function, store_function, blend_function, fin_function);
+		prep_function, store_function, blend_function, fin_function, focal_x, focal_y, viewmatrix);
 }
 
 
@@ -1054,10 +1120,22 @@ __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_back
 	float3* __restrict__ dL_dmean2D,
 	float4* __restrict__ dL_dconic2D,
 	float* __restrict__ dL_dopacity,
-	float* __restrict__ dL_dcolors)
+	float* __restrict__ dL_dcolors,
+	float focal_x, float focal_y,
+	const float* __restrict__ viewmatrix)
 {
-	const float ddelx_dx = 0.5 * W;
-	const float ddely_dy = 0.5 * H;
+	const float cx = 0.5 * W - 0.5;
+	const float cy = 0.5 * H - 0.5;
+	const float inv_x = 1.0f / focal_x;
+	const float inv_y = 1.0f / focal_y;
+	const float f_x = focal_x;
+	const float f_y = focal_y;
+	const float hw = 0.5 * W;
+	const float hh = 0.5 * H;
+	const float tan_fovx = hw * inv_x;
+	const float tan_fovy = hh * inv_y;
+
+
 	// int num_blends = 0;
 	struct BlendData
 	{
@@ -1093,6 +1171,26 @@ __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_back
 		};
 	auto blend_function = [&](const uint2& pixpos, BlendData& blend_data, int global_id, float G, float depth, DebugVisualization debugType)
 		{
+			// add for min error
+			const glm::mat4 inverse_vp = loadMatrix4x4(projmatrix_inv);
+			glm::vec3 p_world = pix2world(glm::vec2((float)pixpos.x, (float)pixpos.y), W, H, inverse_vp);
+			float3 t = transformPoint4x3({p_world.x, p_world.y, p_world.z}, viewmatrix);
+
+			float theta = atan2(-t.y, sqrt(t.x * t.x + t.z * t.z)); 
+			float phi = atan2(t.x, t.z);
+					
+			float sin_phi = sin(phi);
+			float cos_phi = cos(phi);
+
+			float sin_theta = sin(theta);
+			float cos_theta = cos(theta);
+
+			t = {
+				cos_theta * sin_phi,
+				-sin_theta,
+				cos_theta * cos_phi
+			};
+
 			const float4 con_o = conic_opacity[global_id];
 
 			const float alpha = min(0.99f, con_o.w * G);
@@ -1105,7 +1203,42 @@ __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_back
 			// ++num_blends;
 
 			const float2 xy = points_xy_image[global_id];
-			const float2 d = { xy.x - static_cast<float>(pixpos.x), xy.y - static_cast<float>(pixpos.y) };
+
+			p_world = pix2world(glm::vec2(xy.x, xy.y), W, H, inverse_vp);
+			float3 mu = transformPoint4x3({p_world.x, p_world.y, p_world.z}, viewmatrix);
+
+			theta = atan2(-mu.y, sqrt(mu.x * mu.x + mu.z * mu.z)); 
+			phi = atan2(mu.x, mu.z);
+			
+			sin_phi = sin(phi);
+			cos_phi = cos(phi);
+
+			sin_theta = sin(theta);
+			cos_theta = cos(theta);
+
+			mu = {
+				cos_theta * sin_phi,
+				-sin_theta,
+				cos_theta * cos_phi
+			};
+
+			if (mu.x * t.x + mu.y * t.y + mu.z * t.z < 0.0000001f)  // 0.0000001f
+			{
+				return false;
+			}
+
+			float u_xy = 0.0f;
+			float v_xy = 0.0f;
+
+			const float uv_pixf = (mu.x * t.x + mu.y * t.y + mu.z * t.z);
+			const float uv_pixf_inv = 1.f / uv_pixf;
+
+			float u_pixf = max(512.f, focal_x) * (t.x * cos_phi - t.z * sin_phi) * uv_pixf_inv;
+			float v_pixf = max(512.f, focal_y) * (t.x * sin_phi * sin_theta + t.y * cos_theta + t.z * sin_theta * cos_phi) * uv_pixf_inv;
+
+			float2 d = { u_xy - u_pixf, v_xy - v_pixf }; 
+
+			// const float2 d = { xy.x - static_cast<float>(pixpos.x), xy.y - static_cast<float>(pixpos.y) };
 
 
 			const float dchannel_dcolor = alpha * blend_data.T;
@@ -1148,9 +1281,51 @@ __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_back
 			const float dG_ddelx = -gdx * con_o.x - gdy * con_o.y;
 			const float dG_ddely = -gdy * con_o.z - gdx * con_o.y;
 
+
+			const float x = (xy.x - cx) * inv_x;
+			const float y = (xy.y - cy) * inv_y;
+
+			const float tx = t.x;
+			const float ty = t.y;
+
+			const float tx2 = tx * tx;
+			const float ty2 = ty * ty;
+			const float x2 = x * x;
+			const float y2 = y * y;
+
+			const float x2_1 = x2 + 1;
+			const float x2_y2_1 = x2_1 + y * y;
+			const float txx_1 = tx * x + 1;
+			const float txx_tyy_1 = txx_1 + ty * y;
+			const float tmp1 = - tx * (x2_y2_1) + x * (txx_tyy_1);
+
+			const float x2_1_pow1_5 = pow(x2_1, 1.5);
+			const float txx_tyy_1_pow2 = pow(txx_tyy_1, 2);
+			const float x2_y2_1_pow0_5 = sqrt(x2_y2_1);
+			const float x2_1_pow0_5 = sqrt(x2_1);
+
+			const float inv_x2_1_pow1_5 = 1.0f / x2_1_pow1_5;
+			const float inv_x2_1_pow0_5 = 1.0f / x2_1_pow0_5;
+			const float inv_txx_tyy_1_pow2 = 1.0f / txx_tyy_1_pow2;
+			const float inv_x2_y2_1_pow0_5 = 1.0f / x2_y2_1_pow0_5;
+			
+
+			const float ddelx_dx = f_x * (- (tx - x) * (x2_1) * (tmp1) + (x2_y2_1) * (txx_1) * (txx_tyy_1))
+									* inv_x2_1_pow1_5 * inv_txx_tyy_1_pow2 * inv_x2_y2_1_pow0_5;
+			const float ddely_dx = f_y * ((x2_1) * (tmp1) * (- ty * (x2_1) + y * (txx_1)) - (txx_tyy_1) * (- ty * x * pow(x2_1, 2) + x * y * (x2_1) * (txx_1) + x * y * (txx_1) * (x2_y2_1) + (x2_1) * (- tx * y + ty * x) * (x2_y2_1))) 
+									* inv_x2_1_pow1_5 * inv_txx_tyy_1_pow2 / ((x2_y2_1));
+			const float ddelx_dy = f_x * (tx - x) * (ty * (x2_y2_1) - y * (txx_tyy_1)) 
+									* inv_x2_1_pow0_5 * inv_txx_tyy_1_pow2 * inv_x2_y2_1_pow0_5;
+			const float ddely_dy = f_y * (tx2 * x2 + 2 * tx * x + ty2 * x2 + ty2 + 1) 
+									* inv_x2_1_pow0_5 / ((tx2 * x2 + 2 * tx * ty * x * y + 2 * tx * x + ty2 * y2 + 2 * ty * y + 1));
+
+
+
 			// Update gradients w.r.t. 2D mean position of the Gaussian
-			atomicAdd(&dL_dmean2D[global_id].x, dL_dG * dG_ddelx * ddelx_dx);
-			atomicAdd(&dL_dmean2D[global_id].y, dL_dG * dG_ddely * ddely_dy);
+			// atomicAdd(&dL_dmean2D[global_id].x, dL_dG * dG_ddelx * ddelx_dx);
+			// atomicAdd(&dL_dmean2D[global_id].y, dL_dG * dG_ddely * ddely_dy);
+			atomicAdd(&dL_dmean2D[global_id].x, dL_dG * (dG_ddelx * ddelx_dx + dG_ddely * ddely_dx) * tan_fovx);
+			atomicAdd(&dL_dmean2D[global_id].y, dL_dG * (dG_ddelx * ddelx_dy + dG_ddely * ddely_dy) * tan_fovy);
 
 			// Update gradients w.r.t. 2D covariance (2x2 matrix, symmetric)
 			atomicAdd(&dL_dconic2D[global_id].x, -0.5f * gdx * d.x * dL_dG);
@@ -1171,5 +1346,5 @@ __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_back
 
 	sortGaussiansRayHierarchicaEvaluation<HEAD_WINDOW, MID_WINDOW, CULL_ALPHA>(
 		ranges, point_list, W, H, points_xy_image, cov3Ds_inv, projmatrix_inv, cam_pos, conic_opacity, DebugVisualization::Disabled,
-		prep_function, store_function, blend_function, fin_function);
+		prep_function, store_function, blend_function, fin_function, focal_x, focal_y, viewmatrix);
 }

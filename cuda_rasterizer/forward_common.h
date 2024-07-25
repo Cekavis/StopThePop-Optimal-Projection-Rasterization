@@ -70,7 +70,7 @@ __device__ glm::vec3 computeColorFromSH(int idx, int deg, int max_coeffs, const 
 }
 
 // Forward version of 2D covariance matrix computation
-__device__ glm::mat3 computeCov2D(const glm::vec3 p_view, float focal_x, float focal_y, float tan_fovx, float tan_fovy, const float* cov3D, const glm::mat4x3 viewmatrix)
+__device__ glm::mat3 computeNaiveCov2D(const glm::vec3 p_view, float focal_x, float focal_y, float tan_fovx, float tan_fovy, const float* cov3D, const glm::mat4x3 viewmatrix)
 {
 	// The following models the steps outlined by equations 29
 	// and 31 in "EWA Splatting" (Zwicker et al., 2002). 
@@ -103,6 +103,79 @@ __device__ glm::mat3 computeCov2D(const glm::vec3 p_view, float focal_x, float f
 	// Apply low-pass filter: every Gaussian should be at least
 	// one pixel wide/high. Discard 3rd row and column.
     return cov;
+}
+
+/**
+ * Optimal Projection (When adapting to other cameras, no changes for codes are needed here, so the local affine approximation error will not be affected by the camera model.)
+*/
+__device__ glm::mat3 computeCov2D(const glm::vec3 p_view, float focal_x, float focal_y, float tan_fovx, float tan_fovy, const float* cov3D, const glm::mat4x3 viewmatrix)
+{
+
+	// The following models the steps outlined by equations 15
+	// and 18 in "On the Error Analysis of 3D Gaussian Splatting and an Optimal Projection Strategy" (Huang et al., 2024).
+	glm::vec3 t = p_view;
+
+	// For anti-aliasing
+	const float fx = max(512.f, focal_x);
+	const float fy = max(512.f, focal_y);
+
+	// Project the Gaussian's mean onto the tangent plane
+	float dis_inv = 1.0f / (sqrt(t.x * t.x + t.y * t.y + t.z * t.z) + 0.0000001f);
+	float3 mu = { t.x * dis_inv, t.y * dis_inv, t.z * dis_inv};
+
+	// Convert the global ray coordinate to the local tangent plane coordinate. (Equation 18 i.e. invertible matrix Q in paper)
+	float mut_xyz = mu.x * t.x + mu.y * t.y + mu.z * t.z;
+	float mut_xyz2 = mut_xyz * mut_xyz;
+	float mut_xyz2_inv = 1.0f / (mut_xyz2 + 0.0000001f);
+
+	// Cartesian to polar coordinates.
+	float theta = atan2(-mu.y, sqrt(mu.x * mu.x + mu.z * mu.z)); 
+	float phi = atan2(mu.x, mu.z);
+	
+	// To reduce the number of sine and cosine function calculations.
+	float sin_phi = sin(phi);
+	float cos_phi = cos(phi);
+
+	float sin_theta = sin(theta);
+	float cos_theta = cos(theta);
+
+	// (Equation 15 and 18 in paper i.e. Q * J)
+	glm::mat3 J = glm::mat3(
+		fx * (
+			(mu.x * t.z * sin_phi + mu.y * t.y * cos_phi + mu.z * t.z * cos_phi) * mut_xyz2_inv
+		),
+		fx * (
+			(mu.y * (-t.x * cos_phi + t.z * sin_phi)) * mut_xyz2_inv
+		),
+		fx * (
+			-(mu.x * t.x * sin_phi + mu.y * t.y * sin_phi + mu.z * t.x * cos_phi) * mut_xyz2_inv
+		),
+
+		fy * (
+			(-mu.x * t.y * cos_theta - mu.x * t.z * sin_theta * cos_phi + mu.y * t.y * sin_phi * sin_theta + mu.z * t.z * sin_phi * sin_theta) * mut_xyz2_inv
+		),
+		fy * (
+			(mu.x * t.x * cos_theta - mu.y * t.x * sin_phi * sin_theta - mu.y * t.z * sin_theta * cos_phi + mu.z * t.z * cos_theta) * mut_xyz2_inv
+		),
+		fy * (
+			(mu.x * t.x * sin_theta * cos_phi + mu.y * t.y * sin_theta * cos_phi - mu.z * t.x * sin_phi * sin_theta - mu.z * t.y * cos_theta) * mut_xyz2_inv
+		),
+		0.0f,
+		0.0f,
+		0.0f
+	);
+
+	glm::mat3 W = glm::transpose(glm::mat3(viewmatrix));
+	glm::mat3 T = W * J;
+
+	glm::mat3 Vrk = glm::mat3(
+		cov3D[0], cov3D[1], cov3D[2],
+		cov3D[1], cov3D[3], cov3D[4],
+		cov3D[2], cov3D[4], cov3D[5]);
+
+	glm::mat3 cov = glm::transpose(T) * glm::transpose(Vrk) * T;
+
+	return cov;
 }
 
 __device__ inline glm::vec3 dilateCov2D(const glm::mat3 cov, const bool proper_ewa_scaling, float& det_dilated, float& convolution_scaling_factor)

@@ -156,7 +156,11 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	const float extent = tight_opacity_bounding ? min(3.33, sqrt(2.0f * opacity_power_threshold)) : 3.33f;
 
 	const float min_lambda = 0.01f;
-	const float mid = 0.5f * (cov2D.x + cov2D.z);
+
+	glm::mat3 naive_cov = computeNaiveCov2D(p_view, focal_x, focal_y, tan_fovx, tan_fovy, cov3D, viewmatrix_mat);
+	glm::vec3 naive_cov2D = dilateCov2D(naive_cov, proper_ewa_scaling, det, convolution_scaling_factor);
+
+	const float mid = 0.5f * (naive_cov2D.x + naive_cov2D.z);
 	const float lambda = mid + sqrt(max(min_lambda, mid * mid - det));
 	const float radius = extent * sqrt(lambda);
 
@@ -170,8 +174,8 @@ __global__ void preprocessCUDA(int P, int D, int M,
 
 	// Use extent to compute a bounding rectangle of screen-space tiles that this Gaussian overlaps with.
 	// Quit if rectangle covers 0 tiles
-	const float extent_x = min(rect_bounding ? (extent * sqrt(cov2D.x)) : radius, radius);
-	const float extent_y = min(rect_bounding ? (extent * sqrt(cov2D.z)) : radius, radius);
+	const float extent_x = min(rect_bounding ? (extent * sqrt(naive_cov2D.x)) : radius, radius);
+	const float extent_y = min(rect_bounding ? (extent * sqrt(naive_cov2D.z)) : radius, radius);
 	const float2 rect_dims = make_float2(extent_x, extent_y);
 
 	uint2 rect_min, rect_max;
@@ -246,7 +250,8 @@ renderCUDA(
 	DebugVisualization debugVisualizationType,
 	const glm::vec3* cam_pos,
 	const glm::vec3* means3D,
-	float* __restrict__ out_color)
+	float* __restrict__ out_color,
+	float focal_x, float focal_y)
 {
 	// Identify current tile and associated min/max pixel range.
 	auto block = cg::this_thread_block();
@@ -282,6 +287,38 @@ renderCUDA(
 	[[maybe_unused]] float currentDepth = -FLT_MAX;
 	[[maybe_unused]] float sortingErrorCount = 0.f;
 
+	const float cx = 0.5 * W - 0.5;
+	const float cy = 0.5 * H - 0.5;
+	const float inv_focal_x = 1.0f / focal_x;
+	const float inv_focal_y = 1.0f / focal_y;
+	// It needs to correspond to fx, fy in the function computeCov2D.
+	const float fx = max(512.f, focal_x);
+	const float fy = max(512.f, focal_y);
+
+	// Generate rays based on pixels (transformation from image space to ray space).
+	// modify to adapt to various camera models (here is for the pinhole camera)
+	float3 t = {
+		(pixf.x - cx) * inv_focal_x,
+		(pixf.y - cy) * inv_focal_y,
+		1
+	};
+
+	// Normalize the ray direction vector.
+	float theta = atan2(-t.y, sqrt(t.x * t.x + t.z * t.z)); 
+	float phi = atan2(t.x, t.z);
+			
+	float sin_phi = sin(phi);
+	float cos_phi = cos(phi);
+
+	float sin_theta = sin(theta);
+	float cos_theta = cos(theta);
+
+	t = {
+		cos_theta * sin_phi,
+		-sin_theta,
+		cos_theta * cos_phi
+	};
+
 	// Iterate over batches until all done or range is complete
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
 	{
@@ -310,7 +347,45 @@ renderCUDA(
 			// Resample using conic matrix (cf. "Surface 
 			// Splatting" by Zwicker et al., 2001)
 			float2 xy = collected_xy[j];
-			float2 d = { xy.x - pixf.x, xy.y - pixf.y };
+			
+			// Compute the tangent plane coordinates of the 2D Gaussian mean.
+			float3 mu = {
+				(xy.x - cx) * inv_focal_x,
+				(xy.y - cy) * inv_focal_y,
+				1
+			};
+
+			theta = atan2(-mu.y, sqrt(mu.x * mu.x + mu.z * mu.z)); 
+			phi = atan2(mu.x, mu.z);
+			
+			sin_phi = sin(phi);
+			cos_phi = cos(phi);
+
+			sin_theta = sin(theta);
+			cos_theta = cos(theta);
+
+			mu = {
+				cos_theta * sin_phi,
+				-sin_theta,
+				cos_theta * cos_phi
+			};
+
+			// Determine whether the Gaussian mean and the pixel ray are in the same hemisphere.
+			if (mu.x * t.x + mu.y * t.y + mu.z * t.z < 0.0000001f)  // 0.0000001f
+			{
+				continue;
+			}
+
+			float u_xy = 0.0f;
+			float v_xy = 0.0f;
+
+			float uv_pixf_inv = 1.f / (mu.x * t.x + mu.y * t.y + mu.z * t.z);
+
+			float u_pixf = fx * (t.x * cos_phi - t.z * sin_phi) * uv_pixf_inv;
+			float v_pixf = fy * (t.x * sin_phi * sin_theta + t.y * cos_theta + t.z * sin_theta * cos_phi) * uv_pixf_inv;
+
+			float2 d = { u_xy - u_pixf, v_xy - v_pixf };
+
 			float4 con_o = collected_conic_opacity[j];
 			float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
 			if (power > 0.0f)
@@ -382,12 +457,14 @@ void FORWARD::render(
 	uint32_t* n_contrib,
 	const float* bg_color,
 	DebugVisualizationData& debugVisualization,
-	float* out_color)
+	float* out_color,
+	float focal_x, float focal_y,
+	const float* viewmatrix)
 {
 
 	if (splatting_settings.sort_settings.sort_mode == SortMode::GLOBAL)
 	{
-		#define CALL_VANILLA(ENABLE_DEBUG_VIZ) renderCUDA<NUM_CHANNELS, ENABLE_DEBUG_VIZ> <<<grid, block>>> (ranges, point_list, W, H, means2D, colors, conic_opacity, final_T, n_contrib, bg_color, debugVisualization.type, cam_pos, (glm::vec3*)means3D, out_color)
+		#define CALL_VANILLA(ENABLE_DEBUG_VIZ) renderCUDA<NUM_CHANNELS, ENABLE_DEBUG_VIZ> <<<grid, block>>> (ranges, point_list, W, H, means2D, colors, conic_opacity, final_T, n_contrib, bg_color, debugVisualization.type, cam_pos, (glm::vec3*)means3D, out_color, focal_x, focal_y)
 
 		if (debugVisualization.type == DebugVisualization::Disabled) {
 			CALL_VANILLA(false);
@@ -443,7 +520,7 @@ void FORWARD::render(
 	else if (splatting_settings.sort_settings.sort_mode == SortMode::HIERARCHICAL)
 	{
 #define CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, DEBUG) sortGaussiansRayHierarchicalCUDA_forward<NUM_CHANNELS, HEAD_QUEUE_SIZE, MID_QUEUE_SIZE, HIER_CULLING, DEBUG><<<grid, {16, 4, 4}>>>( \
-	ranges, point_list, W, H, means2D, cov3D_inv, projmatrix_inv, (float3 *)cam_pos, colors, conic_opacity, final_T, n_contrib, bg_color, debugVisualization.type, out_color)
+	ranges, point_list, W, H, means2D, cov3D_inv, projmatrix_inv, (float3 *)cam_pos, colors, conic_opacity, final_T, n_contrib, bg_color, debugVisualization.type, out_color, focal_x, focal_y, viewmatrix)
 
 #define CALL_HIER(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE) if (debugVisualization.type == DebugVisualization::Disabled) { CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, false); } else { CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, true); }
 

@@ -797,7 +797,7 @@ __device__ void sortGaussiansRayHierarchicaEvaluation(
 					const glm::vec2 tail_rect_max = { tail_rect_min.x + 3.0f, tail_rect_min.y + 3.0f };
 
 					glm::vec2 max_pos;
-					float power = max_contrib_power_rect_gaussian_float<3, 3>(in_conic_opacity, in_point_xy, tail_rect_min, tail_rect_max, max_pos);
+					float power = max_contrib_power_rect_gaussian_float_opimal_projection<3, 3>(in_conic_opacity, in_point_xy, tail_rect_min, tail_rect_max, W, H, fx, fy, inverse_vp, viewmatrix, max_pos);
 
 					float alpha = min(0.99f, in_conic_opacity.w * exp(-power));
 					if (alpha < 1.0f / 255.0f)

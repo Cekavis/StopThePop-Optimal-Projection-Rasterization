@@ -127,6 +127,127 @@ __device__ inline float max_contrib_power_rect_gaussian(
 	return max_contrib_power;
 }
 
+
+template<uint32_t PATCH_WIDTH, uint32_t PATCH_HEIGHT>
+__device__ inline float max_contrib_power_rect_gaussian_float_opimal_projection(
+	const float4 co, 
+	const float2 mean, 
+	const glm::vec2 rect_min,
+	const glm::vec2 rect_max,
+	const int W,
+	const int H,
+	const float fx,
+	const float fy,
+	const glm::mat4 &inverse_vp,
+	const float *viewmatrix,
+	glm::vec2& max_pos)
+{
+	const float x_min_diff = rect_min.x - mean.x;
+	const float x_left = x_min_diff > 0.0f;
+	// const float x_left = mean.x < rect_min.x;
+	const float not_in_x_range = x_left + (mean.x > rect_max.x);
+
+	const float y_min_diff = rect_min.y - mean.y;
+	const float y_above =  y_min_diff > 0.0f;
+	// const float y_above = mean.y < rect_min.y;
+	const float not_in_y_range = y_above + (mean.y > rect_max.y);
+
+	max_pos = {mean.x, mean.y};
+	float max_contrib_power = 0.0f;
+
+	if ((not_in_y_range + not_in_x_range) > 0.0f)
+	{
+		
+		// Compute the tangent plane coordinates of the 2D Gaussian mean.
+		glm::vec3 p_world = pix2world(glm::vec2(mean.x, mean.y), W, H, inverse_vp);
+		float3 mu = transformPoint4x3({p_world.x, p_world.y, p_world.z}, viewmatrix);
+
+		float theta = atan2(-mu.y, sqrt(mu.x * mu.x + mu.z * mu.z)); 
+		float phi = atan2(mu.x, mu.z);
+
+		float sin_phi = sin(phi);
+		float cos_phi = cos(phi);
+
+		float sin_theta = sin(theta);
+		float cos_theta = cos(theta);
+
+		mu = {
+			cos_theta * sin_phi,
+			-sin_theta,
+			cos_theta * cos_phi
+		};
+
+		auto project_to_tangent_plane = [&](const float2 p, float2& uv_p)
+		{
+			glm::vec3 p_world = pix2world(glm::vec2(p.x, p.y), W, H, inverse_vp);
+			float3 t = transformPoint4x3({p_world.x, p_world.y, p_world.z}, viewmatrix);
+
+			float uv_p_inv = mu.x * t.x + mu.y * t.y + mu.z * t.z;
+			if (uv_p_inv < 0.0000001f)
+			{
+				return false;
+			}
+			uv_p_inv = 1.0f / uv_p_inv;
+			uv_p.x = fx * (t.x * cos_phi - t.z * sin_phi) * uv_p_inv;
+			uv_p.y = fy * (t.x * sin_phi * sin_theta + t.y * cos_theta + t.z * sin_theta * cos_phi) * uv_p_inv;
+			return true;
+		};
+
+		// Image coordinates of the key corner
+		const float px = x_left * rect_min.x + (1.0f - x_left) * rect_max.x;
+		const float py = y_above * rect_min.y + (1.0f - y_above) * rect_max.y;
+
+		// Tangent plane coordinates of the key corner
+		float2 uv_p;
+		if (!project_to_tangent_plane({px, py}, uv_p)) { // if the tangent plane is outside the tile
+			max_pos = {px, py};
+			return 100.0f;
+		}
+
+		const float dx = copysign(float(PATCH_WIDTH), x_min_diff);
+		const float dy = copysign(float(PATCH_HEIGHT), y_min_diff);
+
+		float2 uv_dx;
+		if (!project_to_tangent_plane({px + dx, py}, uv_dx)) { // this happens with small probability, be conservative
+			max_pos = {px, py};
+			return 0.0f;
+		}
+		else
+		{
+			uv_dx.x -= uv_p.x;
+			uv_dx.y -= uv_p.y;
+		}
+
+		float2 uv_dy;
+		if (!project_to_tangent_plane({px, py + dy}, uv_dy)) { // this happens with small probability, be conservative
+			max_pos = {px, py};
+			return 0.0f;
+		}
+		else
+		{
+			uv_dy.x -= uv_p.x;
+			uv_dy.y -= uv_p.y;
+		}
+
+		const float2 diff = {0 - uv_p.x, 0 - uv_p.y};
+
+		const float rcp_1 = __frcp_rn(uv_dx.x * uv_dx.x * co.x + uv_dx.y * uv_dx.y * co.z + 2 * uv_dx.x * uv_dx.y * co.y);
+		const float rcp_2 = __frcp_rn(uv_dy.x * uv_dy.x * co.x + uv_dy.y * uv_dy.y * co.z + 2 * uv_dy.x * uv_dy.y * co.y);
+
+		const float tx = not_in_y_range * __saturatef((uv_dx.x * co.x * diff.x + (uv_dx.x * diff.y + uv_dx.y * diff.x) * co.y + uv_dx.y * co.z * diff.y) * rcp_1);
+		const float ty = not_in_x_range * __saturatef((uv_dy.x * co.x * diff.x + (uv_dy.x * diff.y + uv_dy.y * diff.x) * co.y + uv_dy.y * co.z * diff.y) * rcp_2);
+		
+		max_pos = {uv_p.x + tx * uv_dx.x + ty * uv_dy.x, uv_p.y + tx * uv_dx.y + ty * uv_dy.y};
+		
+		const float2 max_pos_diff = {0 - max_pos.x, 0 - max_pos.y};
+		max_contrib_power = evaluate_opacity_factor(max_pos_diff.x, max_pos_diff.y, co);
+
+		max_pos = {px + tx * dx, py + ty * dy};
+	}
+
+	return max_contrib_power;
+}
+
 template<uint32_t PATCH_WIDTH, uint32_t PATCH_HEIGHT>
 __device__ inline float max_contrib_power_rect_gaussian_float(
 	const float4 co, 

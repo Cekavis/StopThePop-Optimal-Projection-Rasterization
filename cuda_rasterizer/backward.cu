@@ -957,10 +957,22 @@ void BACKWARD::render(
 	}
 	else if (sort_settings.sort_mode == SortMode::HIERARCHICAL)
 	{
+		// Compute the inverse of the projection matrix
+		float a[16], b[16], c[16];
+		cudaMemcpy(a, projmatrix_inv, 16 * sizeof(float), cudaMemcpyDeviceToHost);
+		cudaMemcpy(b, viewmatrix, 16 * sizeof(float), cudaMemcpyDeviceToHost);
+		memset(c, 0, 16 * sizeof(float));
+		for (int i = 0; i < 4; i++) for (int k = 0; k < 4; k++) for (int j = 0; j < 4; j++)
+			c[i * 4 + j] += a[i * 4 + k] * b[k * 4 + j];
+
+		float* partialprojmatrix_inv;
+		cudaMalloc((void**)&partialprojmatrix_inv, 16 * sizeof(float));
+		cudaMemcpy(partialprojmatrix_inv, c, 16 * sizeof(float), cudaMemcpyHostToDevice);
+
 #define CALL_HIER(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE) \
 	sortGaussiansRayHierarchicalCUDA_backward<NUM_CHANNELS, HEAD_QUEUE_SIZE, MID_QUEUE_SIZE, HIER_CULLING><<<grid, {16, 4, 4}>>>( \
 		ranges, point_list, W, H, bg_color, means2D, cov3D_inv, projmatrix_inv, (float3*) cam_pos, conic_opacity, \
-		colors, final_Ts, n_contrib, pixel_colors, dL_dpixels, dL_dmean2D, dL_dconic2D, dL_dopacity, dL_dcolors, focal_x, focal_y, viewmatrix)
+		colors, final_Ts, n_contrib, pixel_colors, dL_dpixels, dL_dmean2D, dL_dconic2D, dL_dopacity, dL_dcolors, focal_x, focal_y, partialprojmatrix_inv)
 
 #define CALL_HIER_HEAD(HIER_CULLING, MID_QUEUE_SIZE) \
 	switch (sort_settings.queue_sizes.per_pixel) \

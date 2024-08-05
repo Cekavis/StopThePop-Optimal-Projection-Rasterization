@@ -220,7 +220,7 @@ __device__ void sortGaussiansRayHierarchicaEvaluation(
 	BF && blend_function,
 	FF && fin_function,
 	float focal_x, float focal_y,
-	const float* __restrict__ viewmatrix)
+	const float* __restrict__ partialprojmatrix_inv)
 {
 #if (DEBUG_HIERARCHICAL & 0x100) != 0
 	//if (blockIdx.x != 7 || blockIdx.y != 7)
@@ -319,6 +319,7 @@ __device__ void sortGaussiansRayHierarchicaEvaluation(
 	const uint2 tail_corner = { tile_min.x + 4 * block.thread_index().y, tile_min.y + 4 * block.thread_index().z };
 
 	const glm::mat4 inverse_vp = loadMatrix4x4(projmatrix_inv);
+	const glm::mat4 inverse_p  = loadMatrix4x4(partialprojmatrix_inv);
 	const float3 campos = *cam_pos;
 
 	if (block.thread_index().x < 5)
@@ -426,8 +427,7 @@ __device__ void sortGaussiansRayHierarchicaEvaluation(
 
 	// Generate rays based on pixels (transformation from image space to ray space).
 	// modify to adapt to various camera models (here is for the pinhole camera)
-	glm::vec3 p_world = pix2world(glm::vec2((float)pixpos.x, (float)pixpos.y), W, H, inverse_vp);
-	float3 t = transformPoint4x3({p_world.x, p_world.y, p_world.z}, viewmatrix);
+	glm::vec3 t = pix2view(glm::vec2((float)pixpos.x, (float)pixpos.y), W, H, inverse_p);
 	
 	// Normalize the ray direction vector.
 	float theta = atan2(-t.y, sqrt(t.x * t.x + t.z * t.z)); 
@@ -520,8 +520,7 @@ __device__ void sortGaussiansRayHierarchicaEvaluation(
 
 
 					// Compute the tangent plane coordinates of the 2D Gaussian mean.
-					p_world = pix2world(glm::vec2(xy.x, xy.y), W, H, inverse_vp);
-					float3 mu = transformPoint4x3({p_world.x, p_world.y, p_world.z}, viewmatrix);
+					glm::vec3 mu = pix2view(glm::vec2(xy.x, xy.y), W, H, inverse_p);
 
 					theta = atan2(-mu.y, sqrt(mu.x * mu.x + mu.z * mu.z)); 
 					phi = atan2(mu.x, mu.z);
@@ -797,7 +796,7 @@ __device__ void sortGaussiansRayHierarchicaEvaluation(
 					const glm::vec2 tail_rect_max = { tail_rect_min.x + 3.0f, tail_rect_min.y + 3.0f };
 
 					glm::vec2 max_pos;
-					float power = max_contrib_power_rect_gaussian_float_opimal_projection<3, 3>(in_conic_opacity, in_point_xy, tail_rect_min, tail_rect_max, W, H, fx, fy, inverse_vp, viewmatrix, max_pos);
+					float power = max_contrib_power_rect_gaussian_float_opimal_projection<3, 3>(in_conic_opacity, in_point_xy, tail_rect_min, tail_rect_max, W, H, fx, fy, inverse_p, max_pos);
 
 					float alpha = min(0.99f, in_conic_opacity.w * exp(-power));
 					if (alpha < 1.0f / 255.0f)
@@ -1017,7 +1016,7 @@ __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_forw
 	DebugVisualization debugType,
 	float* __restrict__ out_color,
 	float focal_x, float focal_y,
-	const float* __restrict__ viewmatrix)
+	const float* __restrict__ partialprojmatrix_inv)
 {
 	// int num_blends = 0;
 	struct BlendDataRaw
@@ -1097,7 +1096,7 @@ __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_forw
 
 	sortGaussiansRayHierarchicaEvaluation<HEAD_WINDOW, MID_WINDOW, CULL_ALPHA>(
 		ranges, point_list, W, H, points_xy_image, cov3Ds_inv, projmatrix_inv, cam_pos, conic_opacity, debugType,
-		prep_function, store_function, blend_function, fin_function, focal_x, focal_y, viewmatrix);
+		prep_function, store_function, blend_function, fin_function, focal_x, focal_y, partialprojmatrix_inv);
 }
 
 
@@ -1122,7 +1121,7 @@ __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_back
 	float* __restrict__ dL_dopacity,
 	float* __restrict__ dL_dcolors,
 	float focal_x, float focal_y,
-	const float* __restrict__ viewmatrix)
+	const float* __restrict__ partialprojmatrix_inv)
 {
 	const float cx = 0.5 * W - 0.5;
 	const float cy = 0.5 * H - 0.5;
@@ -1172,9 +1171,8 @@ __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_back
 	auto blend_function = [&](const uint2& pixpos, BlendData& blend_data, int global_id, float G, float depth, DebugVisualization debugType)
 		{
 			// add for min error
-			const glm::mat4 inverse_vp = loadMatrix4x4(projmatrix_inv);
-			glm::vec3 p_world = pix2world(glm::vec2((float)pixpos.x, (float)pixpos.y), W, H, inverse_vp);
-			float3 t = transformPoint4x3({p_world.x, p_world.y, p_world.z}, viewmatrix);
+			const glm::mat4 inverse_p = loadMatrix4x4(partialprojmatrix_inv);
+			glm::vec3 t = pix2view(glm::vec2((float)pixpos.x, (float)pixpos.y), W, H, inverse_p);
 
 			float theta = atan2(-t.y, sqrt(t.x * t.x + t.z * t.z)); 
 			float phi = atan2(t.x, t.z);
@@ -1204,8 +1202,7 @@ __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_back
 
 			const float2 xy = points_xy_image[global_id];
 
-			p_world = pix2world(glm::vec2(xy.x, xy.y), W, H, inverse_vp);
-			float3 mu = transformPoint4x3({p_world.x, p_world.y, p_world.z}, viewmatrix);
+			glm::vec3 mu = pix2view(glm::vec2(xy.x, xy.y), W, H, inverse_p);
 
 			theta = atan2(-mu.y, sqrt(mu.x * mu.x + mu.z * mu.z)); 
 			phi = atan2(mu.x, mu.z);
@@ -1346,5 +1343,5 @@ __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_back
 
 	sortGaussiansRayHierarchicaEvaluation<HEAD_WINDOW, MID_WINDOW, CULL_ALPHA>(
 		ranges, point_list, W, H, points_xy_image, cov3Ds_inv, projmatrix_inv, cam_pos, conic_opacity, DebugVisualization::Disabled,
-		prep_function, store_function, blend_function, fin_function, focal_x, focal_y, viewmatrix);
+		prep_function, store_function, blend_function, fin_function, focal_x, focal_y, partialprojmatrix_inv);
 }

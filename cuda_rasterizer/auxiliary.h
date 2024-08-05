@@ -88,6 +88,15 @@ __forceinline__ __device__ glm::vec3 world2ndc(const glm::vec3 p_world, const gl
 
 	return p_ndc;
 }
+
+__forceinline__ __device__ glm::vec3 pix2view(const glm::vec2 pix, const int W, const int H, const glm::mat4 inverse_p)
+{
+	const glm::vec2 pix_ndc = pix * glm::vec2(2.0f / W, 2.0f / H) - 1.0f;
+	glm::vec4 p_view = inverse_p[0] * pix_ndc.x + inverse_p[1] * pix_ndc.y + inverse_p[3];
+	float rcp_w = __frcp_rn(p_view.w);
+	return glm::vec3(p_view) * rcp_w;
+}
+
 __forceinline__ __device__ void getRect(const float2 p, const float2 rect_extent, uint2& rect_min, uint2& rect_max, dim3 grid)
 {
 	rect_min = {

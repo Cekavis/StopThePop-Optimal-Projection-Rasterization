@@ -138,8 +138,7 @@ __device__ inline float max_contrib_power_rect_gaussian_float_opimal_projection(
 	const int H,
 	const float fx,
 	const float fy,
-	const glm::mat4 &inverse_vp,
-	const float *viewmatrix,
+	const glm::mat4 &inverse_p,
 	glm::vec2& max_pos)
 {
 	const float x_min_diff = rect_min.x - mean.x;
@@ -159,8 +158,7 @@ __device__ inline float max_contrib_power_rect_gaussian_float_opimal_projection(
 	{
 		
 		// Compute the tangent plane coordinates of the 2D Gaussian mean.
-		glm::vec3 p_world = pix2world(glm::vec2(mean.x, mean.y), W, H, inverse_vp);
-		float3 mu = transformPoint4x3({p_world.x, p_world.y, p_world.z}, viewmatrix);
+		glm::vec3 mu = pix2view(glm::vec2(mean.x, mean.y), W, H, inverse_p);
 
 		float theta = atan2(-mu.y, sqrt(mu.x * mu.x + mu.z * mu.z)); 
 		float phi = atan2(mu.x, mu.z);
@@ -179,8 +177,7 @@ __device__ inline float max_contrib_power_rect_gaussian_float_opimal_projection(
 
 		auto project_to_tangent_plane = [&](const float2 p, float2& uv_p)
 		{
-			glm::vec3 p_world = pix2world(glm::vec2(p.x, p.y), W, H, inverse_vp);
-			float3 t = transformPoint4x3({p_world.x, p_world.y, p_world.z}, viewmatrix);
+			glm::vec3 t = pix2view(glm::vec2(p.x, p.y), W, H, inverse_p);
 
 			float uv_p_inv = mu.x * t.x + mu.y * t.y + mu.z * t.z;
 			if (uv_p_inv < 0.0000001f)

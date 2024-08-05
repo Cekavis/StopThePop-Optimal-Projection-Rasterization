@@ -519,8 +519,20 @@ void FORWARD::render(
 	}
 	else if (splatting_settings.sort_settings.sort_mode == SortMode::HIERARCHICAL)
 	{
+		// Compute the inverse of the projection matrix
+		float a[16], b[16], c[16];
+		cudaMemcpy(a, projmatrix_inv, 16 * sizeof(float), cudaMemcpyDeviceToHost);
+		cudaMemcpy(b, viewmatrix, 16 * sizeof(float), cudaMemcpyDeviceToHost);
+		memset(c, 0, 16 * sizeof(float));
+		for (int i = 0; i < 4; i++) for (int k = 0; k < 4; k++) for (int j = 0; j < 4; j++)
+			c[i * 4 + j] += a[i * 4 + k] * b[k * 4 + j];
+
+		float* partialprojmatrix_inv;
+		cudaMalloc((void**)&partialprojmatrix_inv, 16 * sizeof(float));
+		cudaMemcpy(partialprojmatrix_inv, c, 16 * sizeof(float), cudaMemcpyHostToDevice);
+		
 #define CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, DEBUG) sortGaussiansRayHierarchicalCUDA_forward<NUM_CHANNELS, HEAD_QUEUE_SIZE, MID_QUEUE_SIZE, HIER_CULLING, DEBUG><<<grid, {16, 4, 4}>>>( \
-	ranges, point_list, W, H, means2D, cov3D_inv, projmatrix_inv, (float3 *)cam_pos, colors, conic_opacity, final_T, n_contrib, bg_color, debugVisualization.type, out_color, focal_x, focal_y, viewmatrix)
+	ranges, point_list, W, H, means2D, cov3D_inv, projmatrix_inv, (float3 *)cam_pos, colors, conic_opacity, final_T, n_contrib, bg_color, debugVisualization.type, out_color, focal_x, focal_y, partialprojmatrix_inv)
 
 #define CALL_HIER(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE) if (debugVisualization.type == DebugVisualization::Disabled) { CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, false); } else { CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, true); }
 

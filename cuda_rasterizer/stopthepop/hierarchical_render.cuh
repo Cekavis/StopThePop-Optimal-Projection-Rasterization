@@ -204,7 +204,7 @@ __device__ void batcherSort(CG& cg, KT* keys, VT* vals)
 #define DEBUG_HIERARCHICAL 0x0
 
 // MID_WINDOW needs to be pow2+4, minimum 8
-template <int HEAD_WINDOW, int MID_WINDOW, bool CULL_ALPHA, typename PF, typename SF, typename BF, typename FF>
+template <int HEAD_WINDOW, int MID_WINDOW, bool CULL_ALPHA, bool FOVEATED_RENDERING, typename PF, typename SF, typename BF, typename FF>
 __device__ void sortGaussiansRayHierarchicaEvaluation(
 	const uint2* __restrict__ ranges,
 	const uint32_t* __restrict__ point_list,
@@ -354,6 +354,8 @@ __device__ void sortGaussiansRayHierarchicaEvaluation(
 
 	const uint2 pixpos = { tail_corner.x + midx * 2 + headx, tail_corner.y + midy * 2 + heady };
 	bool active = pixpos.x < W && pixpos.y < H;
+	
+	if constexpr (FOVEATED_RENDERING) if (pixpos.x < 160 || pixpos.x / 16 >= W / 16 - 10 || pixpos.y < 160 || pixpos.y / 16 >= H / 16 - 10) return;
 
 	const float3 viewdir = computeViewRay(inverse_vp, campos, float2{ static_cast<float>(pixpos.x), static_cast<float>(pixpos.y) }, W, H);
 #if (DEBUG_HIERARCHICAL & 0x2F) != 0 && (DEBUG_HIERARCHICAL & 0x100) != 0
@@ -384,6 +386,15 @@ __device__ void sortGaussiansRayHierarchicaEvaluation(
 
 	// thread state variables
 	auto blend_data = prep_function(active, pixpos);
+
+	// if constexpr (FOVEATED_RENDERING) if (pixpos.x < 160 || pixpos.x / 16 >= W / 16 - 10 || pixpos.y < 160 || pixpos.y / 16 >= H / 16 - 10)
+	// {
+	// 	blend_data.C[0] = 1.0f;
+	// 	blend_data.C[1] = 0.0f;
+	// 	blend_data.C[2] = 0.0f;
+	// 	blend_data.T = 1.0f;
+	// 	fin_function(pixpos, blend_data, debugType, range.y - range.x);
+	// }
 	
 	// lambdas controlling the behavior
 	auto blend_one = [&]()
@@ -999,7 +1010,7 @@ __device__ void sortGaussiansRayHierarchicaEvaluation(
 
 
 
-template <int32_t CHANNELS, int HEAD_WINDOW, int MID_WINDOW, bool CULL_ALPHA = true, bool ENABLE_DEBUG_VIZ = false>
+template <int32_t CHANNELS, int HEAD_WINDOW, int MID_WINDOW, bool CULL_ALPHA = true, bool ENABLE_DEBUG_VIZ = false, bool FOVEATED_RENDERING = false>
 __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_forward(
 	const uint2* __restrict__ ranges,
 	const uint32_t* __restrict__ point_list,
@@ -1094,7 +1105,7 @@ __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_forw
 			}
 		};
 
-	sortGaussiansRayHierarchicaEvaluation<HEAD_WINDOW, MID_WINDOW, CULL_ALPHA>(
+	sortGaussiansRayHierarchicaEvaluation<HEAD_WINDOW, MID_WINDOW, CULL_ALPHA, FOVEATED_RENDERING>(
 		ranges, point_list, W, H, points_xy_image, cov3Ds_inv, projmatrix_inv, cam_pos, conic_opacity, debugType,
 		prep_function, store_function, blend_function, fin_function, focal_x, focal_y, partialprojmatrix_inv);
 }
@@ -1341,7 +1352,7 @@ __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_back
 			return;
 		};
 
-	sortGaussiansRayHierarchicaEvaluation<HEAD_WINDOW, MID_WINDOW, CULL_ALPHA>(
+	sortGaussiansRayHierarchicaEvaluation<HEAD_WINDOW, MID_WINDOW, CULL_ALPHA, false>(
 		ranges, point_list, W, H, points_xy_image, cov3Ds_inv, projmatrix_inv, cam_pos, conic_opacity, DebugVisualization::Disabled,
 		prep_function, store_function, blend_function, fin_function, focal_x, focal_y, partialprojmatrix_inv);
 }

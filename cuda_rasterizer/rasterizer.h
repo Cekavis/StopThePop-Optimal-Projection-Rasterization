@@ -14,7 +14,7 @@
 
 // Uncomment if you experience unreasonably long build times (only compile kernels for the default queue sizes)
 // Additionally, you can specify the exact CUDA_ARCHITECTURE in the CMakeLists.txt (default "70;75;86")
-// #define STOPTHEPOP_FASTBUILD
+#define STOPTHEPOP_FASTBUILD
 
 #include <vector>
 #include <functional>
@@ -132,6 +132,7 @@ namespace CudaRasterizer
         CullingSettings culling_settings;
         bool load_balancing;
         bool proper_ewa_scaling;
+		bool foveated_rendering;
     };
 
     void inline to_json(nlohmann::json& j, const SplattingSettings& s)
@@ -154,6 +155,7 @@ namespace CudaRasterizer
             }},
             {"load_balancing", s.load_balancing},
             {"proper_ewa_scaling", s.proper_ewa_scaling},
+			{"foveated_rendering", s.foveated_rendering}
         };
     }
 
@@ -179,6 +181,7 @@ namespace CudaRasterizer
         }
         j.at("load_balancing").get_to(s.load_balancing);
         j.at("proper_ewa_scaling").get_to(s.proper_ewa_scaling);
+		j.at("foveated_rendering").get_to(s.foveated_rendering);
     }
 
 	class Rasterizer

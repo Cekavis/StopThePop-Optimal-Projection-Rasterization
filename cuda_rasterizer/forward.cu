@@ -531,23 +531,23 @@ void FORWARD::render(
 		cudaMalloc((void**)&partialprojmatrix_inv, 16 * sizeof(float));
 		cudaMemcpy(partialprojmatrix_inv, c, 16 * sizeof(float), cudaMemcpyHostToDevice);
 		
-#define CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, DEBUG) sortGaussiansRayHierarchicalCUDA_forward<NUM_CHANNELS, HEAD_QUEUE_SIZE, MID_QUEUE_SIZE, HIER_CULLING, DEBUG><<<grid, {16, 4, 4}>>>( \
+#define CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, DEBUG, FOVEATED_RENDERING) sortGaussiansRayHierarchicalCUDA_forward<NUM_CHANNELS, HEAD_QUEUE_SIZE, MID_QUEUE_SIZE, HIER_CULLING, DEBUG, FOVEATED_RENDERING><<<grid, {16, 4, 4}>>>( \
 	ranges, point_list, W, H, means2D, cov3D_inv, projmatrix_inv, (float3 *)cam_pos, colors, conic_opacity, final_T, n_contrib, bg_color, debugVisualization.type, out_color, focal_x, focal_y, partialprojmatrix_inv)
 
-#define CALL_HIER(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE) if (debugVisualization.type == DebugVisualization::Disabled) { CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, false); } else { CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, true); }
+#define CALL_HIER(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, FOVEATED_RENDERING) if (debugVisualization.type == DebugVisualization::Disabled) { CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, false, FOVEATED_RENDERING); } else { CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, true, FOVEATED_RENDERING); }
 
 #ifdef STOPTHEPOP_FASTBUILD
-#define CALL_HIER_HEAD(HIER_CULLING, MID_QUEUE_SIZE) \
+#define CALL_HIER_HEAD(HIER_CULLING, MID_QUEUE_SIZE, FOVEATED_RENDERING) \
 	switch (splatting_settings.sort_settings.queue_sizes.per_pixel) \
 	{ \
-		case 4: { CALL_HIER(HIER_CULLING, MID_QUEUE_SIZE, 4); break; } \
+		case 4: { CALL_HIER(HIER_CULLING, MID_QUEUE_SIZE, 4, FOVEATED_RENDERING); break; } \
 		default: { throw std::runtime_error("Not supported head queue size"); } \
 	}
 
-#define CALL_HIER_MID(HIER_CULLING) \
+#define CALL_HIER_MID(HIER_CULLING, FOVEATED_RENDERING) \
 	switch (splatting_settings.sort_settings.queue_sizes.tile_2x2) \
 	{ \
-		case 8: { CALL_HIER_HEAD(HIER_CULLING, 8); break; } \
+		case 8: { CALL_HIER_HEAD(HIER_CULLING, 8, FOVEATED_RENDERING); break; } \
 		default: { throw std::runtime_error("Not supported mid queue size"); } \
 	}
 #else // STOPTHEPOP_FASTBUILD
@@ -560,7 +560,7 @@ void FORWARD::render(
 		default: { throw std::runtime_error("Not supported head queue size"); } \
 	}
 
-#define CALL_HIER_MID(HIER_CULLING) \
+#define CALL_HIER_MID(HIER_CULLING, ) \
 	switch (splatting_settings.sort_settings.queue_sizes.tile_2x2) \
 	{ \
 		case 8: { CALL_HIER_HEAD(HIER_CULLING, 8); break; } \
@@ -571,9 +571,19 @@ void FORWARD::render(
 #endif // STOPTHEPOP_FASTBUILD
 
 	if (splatting_settings.culling_settings.hierarchical_4x4_culling) {
-		CALL_HIER_MID(true);
+		if (splatting_settings.foveated_rendering)
+		{
+			CALL_HIER_MID(true, true);
+		} else {
+			CALL_HIER_MID(true, false);
+		}
 	} else {
-		CALL_HIER_MID(false);
+		if (splatting_settings.foveated_rendering)
+		{
+			CALL_HIER_MID(false, true);
+		} else {
+			CALL_HIER_MID(false, false);
+		}
 	}
 
 #undef CALL_HIER_MID

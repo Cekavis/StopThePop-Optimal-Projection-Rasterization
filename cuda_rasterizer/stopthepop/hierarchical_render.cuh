@@ -204,7 +204,7 @@ __device__ void batcherSort(CG& cg, KT* keys, VT* vals)
 #define DEBUG_HIERARCHICAL 0x0
 
 // MID_WINDOW needs to be pow2+4, minimum 8
-template <int HEAD_WINDOW, int MID_WINDOW, bool CULL_ALPHA, typename PF, typename SF, typename BF, typename FF>
+template <int HEAD_WINDOW, int MID_WINDOW, bool CULL_ALPHA, bool NEW_CULLING, typename PF, typename SF, typename BF, typename FF>
 __device__ void sortGaussiansRayHierarchicaEvaluation(
 	const uint2* __restrict__ ranges,
 	const uint32_t* __restrict__ point_list,
@@ -999,7 +999,7 @@ __device__ void sortGaussiansRayHierarchicaEvaluation(
 
 
 
-template <int32_t CHANNELS, int HEAD_WINDOW, int MID_WINDOW, bool CULL_ALPHA = true, bool ENABLE_DEBUG_VIZ = false>
+template <int32_t CHANNELS, int HEAD_WINDOW, int MID_WINDOW, bool CULL_ALPHA = true, bool NEW_CULLING = false, bool ENABLE_DEBUG_VIZ = false>
 __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_forward(
 	const uint2* __restrict__ ranges,
 	const uint32_t* __restrict__ point_list,
@@ -1094,13 +1094,13 @@ __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_forw
 			}
 		};
 
-	sortGaussiansRayHierarchicaEvaluation<HEAD_WINDOW, MID_WINDOW, CULL_ALPHA>(
+	sortGaussiansRayHierarchicaEvaluation<HEAD_WINDOW, MID_WINDOW, CULL_ALPHA, NEW_CULLING>(
 		ranges, point_list, W, H, points_xy_image, cov3Ds_inv, projmatrix_inv, cam_pos, conic_opacity, debugType,
 		prep_function, store_function, blend_function, fin_function, focal_x, focal_y, partialprojmatrix_inv);
 }
 
 
-template <int32_t CHANNELS, int HEAD_WINDOW, int MID_WINDOW, bool CULL_ALPHA = true>
+template <int32_t CHANNELS, int HEAD_WINDOW, int MID_WINDOW, bool CULL_ALPHA = true, bool NEW_CULLING = false>
 __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_backward(
 	const uint2* __restrict__ ranges,
 	const uint32_t* __restrict__ point_list,
@@ -1341,7 +1341,7 @@ __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_back
 			return;
 		};
 
-	sortGaussiansRayHierarchicaEvaluation<HEAD_WINDOW, MID_WINDOW, CULL_ALPHA>(
+	sortGaussiansRayHierarchicaEvaluation<HEAD_WINDOW, MID_WINDOW, CULL_ALPHA, NEW_CULLING>(
 		ranges, point_list, W, H, points_xy_image, cov3Ds_inv, projmatrix_inv, cam_pos, conic_opacity, DebugVisualization::Disabled,
 		prep_function, store_function, blend_function, fin_function, focal_x, focal_y, partialprojmatrix_inv);
 }

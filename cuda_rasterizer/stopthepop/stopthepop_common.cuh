@@ -7,6 +7,8 @@
 
 #include "../auxiliary.h"
 
+#include <glm/glm.hpp>
+
 #include <cooperative_groups.h>
 namespace cg = cooperative_groups;
 
@@ -291,13 +293,18 @@ __device__ inline float max_contrib_power_rect_gaussian_float(
 	return max_contrib_power;
 }
 
-template<bool LOAD_BALANCING, uint32_t SEQUENTIAL_TILE_THRESH = 32>
+template<bool LOAD_BALANCING, bool NEW_CULLING, uint32_t SEQUENTIAL_TILE_THRESH = 32>
 __device__ inline int computeTilebasedCullingTileCount(const bool active, 
 	const float4 co_init, 
 	const float2 xy_init, 
 	const float opacity_power_threshold_init,
 	const uint2 rect_min_init, 
-	const uint2 rect_max_init)
+	const uint2 rect_max_init,
+	const int W,
+	const int H,
+	const float fx,
+	const float fy,
+	const glm::mat4 &inverse_p)
 {
 	const int32_t tile_count_init = (rect_max_init.y - rect_min_init.y) * (rect_max_init.x - rect_min_init.x);
 
@@ -314,7 +321,14 @@ __device__ inline int computeTilebasedCullingTileCount(const bool active,
 			const glm::vec2 tile_max = {(x + 1) * BLOCK_X - 1, (y + 1) * BLOCK_Y - 1};
 
 			glm::vec2 max_pos;
-			float max_opac_factor = max_contrib_power_rect_gaussian_float<BLOCK_X-1, BLOCK_Y-1>(co_init, xy_init, tile_min, tile_max, max_pos);
+			float max_opac_factor;
+			if (NEW_CULLING)
+			{
+				max_opac_factor = max_contrib_power_rect_gaussian_float_opimal_projection<BLOCK_X-1, BLOCK_Y-1>(co_init, xy_init, tile_min, tile_max, W, H, fx, fy, inverse_p, max_pos);
+			}
+			else {
+				max_opac_factor = max_contrib_power_rect_gaussian_float<BLOCK_X-1, BLOCK_Y-1>(co_init, xy_init, tile_min, tile_max, max_pos);
+			}
 			tile_count += (max_opac_factor <= opacity_power_threshold_init);
 		}
 	}
@@ -365,7 +379,14 @@ __device__ inline int computeTilebasedCullingTileCount(const bool active,
 			const glm::vec2 tile_max = {(x + 1) * BLOCK_X - 1, (y + 1) * BLOCK_Y - 1};
 
 			glm::vec2 max_pos;
-			const float max_opac_factor = max_contrib_power_rect_gaussian_float<BLOCK_X-1, BLOCK_Y-1>(co, xy, tile_min, tile_max, max_pos);
+			float max_opac_factor;
+			if (NEW_CULLING)
+			{
+				max_opac_factor = max_contrib_power_rect_gaussian_float_opimal_projection<BLOCK_X-1, BLOCK_Y-1>(co, xy, tile_min, tile_max, W, H, fx, fy, inverse_p, max_pos);
+			}
+			else {
+				max_opac_factor = max_contrib_power_rect_gaussian_float<BLOCK_X-1, BLOCK_Y-1>(co, xy, tile_min, tile_max, max_pos);
+			}
 
 			const uint32_t tile_contributes = active_curr_it && max_opac_factor <= opacity_power_threshold;
 
@@ -439,7 +460,7 @@ __device__ inline glm::vec2 getPerTileDepthTargetPos(const glm::vec2 tile_center
 	return target_pos;
 }
 
-template<bool TILE_BASED_CULLING, bool LOAD_BALANCING = true, CudaRasterizer::GlobalSortOrder SORT_ORDER = CudaRasterizer::GlobalSortOrder::VIEWSPACE_Z>
+template<bool TILE_BASED_CULLING, bool LOAD_BALANCING = true, CudaRasterizer::GlobalSortOrder SORT_ORDER = CudaRasterizer::GlobalSortOrder::VIEWSPACE_Z, bool NEW_CULLING>
 __global__ void duplicateWithKeys_extended(
 	int P,
 	const float2* __restrict__ points_xy,
@@ -455,7 +476,9 @@ __global__ void duplicateWithKeys_extended(
 	uint32_t* __restrict__ gaussian_values_unsorted,
 	const int* __restrict__ radii,
 	const float2* __restrict__ rects,
-	dim3 grid)
+	dim3 grid,
+	const float focal_x, const float focal_y,
+	const float *partialprojmatrix_inv)
 {	
 	auto block = cg::this_thread_block();
 	auto warp = cg::tiled_partition<WARP_SIZE>(block);
@@ -532,6 +555,8 @@ __global__ void duplicateWithKeys_extended(
 	const glm::vec4 inversed_vp1 = inversed_vp[1];
 	const glm::vec4 inversed_vp3 = inversed_vp[3];
 
+	const glm::mat4 inverse_p = loadMatrix4x4(partialprojmatrix_inv);	
+
 	const glm::vec3 cam_pos_tmp = *cam_pos;
 
 	auto tile_function = [&](int x, int y,
@@ -551,7 +576,13 @@ __global__ void duplicateWithKeys_extended(
 			float max_opac_factor = 0.0f;
 			if constexpr (EVAL_MAX_CONTRIB_POS)
 			{
-				max_opac_factor = max_contrib_power_rect_gaussian_float<BLOCK_X-1, BLOCK_Y-1>(co, xy, tile_min, tile_max, max_pos);
+				if (NEW_CULLING)
+				{
+					max_opac_factor = max_contrib_power_rect_gaussian_float_opimal_projection<BLOCK_X-1, BLOCK_Y-1>(co, xy, tile_min, tile_max, W, H, max(500.0f, focal_x), max(500.0f, focal_y), inverse_p, max_pos);
+				}
+				else {
+					max_opac_factor = max_contrib_power_rect_gaussian_float<BLOCK_X-1, BLOCK_Y-1>(co, xy, tile_min, tile_max, max_pos);
+				}
 			}
 
 			if constexpr (PER_TILE_DEPTH) 

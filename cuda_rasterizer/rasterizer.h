@@ -82,6 +82,7 @@ namespace CudaRasterizer
 		bool tight_opacity_bounding = false;
 		bool tile_based_culling = false;
 		bool hierarchical_4x4_culling = false;
+		bool new_culling = false;
 	};
 
 	inline std::string toString(SortMode m) {
@@ -150,7 +151,8 @@ namespace CudaRasterizer
                 {"rect_bounding", s.culling_settings.rect_bounding},
                 {"tight_opacity_bounding", s.culling_settings.tight_opacity_bounding},
                 {"tile_based_culling", s.culling_settings.tile_based_culling},
-                {"hierarchical_4x4_culling", s.culling_settings.hierarchical_4x4_culling}
+                {"hierarchical_4x4_culling", s.culling_settings.hierarchical_4x4_culling},
+				{"new_culling", s.culling_settings.new_culling}
             }},
             {"load_balancing", s.load_balancing},
             {"proper_ewa_scaling", s.proper_ewa_scaling},
@@ -176,6 +178,7 @@ namespace CudaRasterizer
             j_culling.at("tight_opacity_bounding").get_to(s.culling_settings.tight_opacity_bounding);
             j_culling.at("tile_based_culling").get_to(s.culling_settings.tile_based_culling);
             j_culling.at("hierarchical_4x4_culling").get_to(s.culling_settings.hierarchical_4x4_culling);
+			j_culling.at("new_culling").get_to(s.culling_settings.new_culling);
         }
         j.at("load_balancing").get_to(s.load_balancing);
         j.at("proper_ewa_scaling").get_to(s.proper_ewa_scaling);

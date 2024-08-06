@@ -969,34 +969,42 @@ void BACKWARD::render(
 		cudaMalloc((void**)&partialprojmatrix_inv, 16 * sizeof(float));
 		cudaMemcpy(partialprojmatrix_inv, c, 16 * sizeof(float), cudaMemcpyHostToDevice);
 
-#define CALL_HIER(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE) \
-	sortGaussiansRayHierarchicalCUDA_backward<NUM_CHANNELS, HEAD_QUEUE_SIZE, MID_QUEUE_SIZE, HIER_CULLING><<<grid, {16, 4, 4}>>>( \
+#define CALL_HIER(HIER_CULLING, NEW_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE) \
+	sortGaussiansRayHierarchicalCUDA_backward<NUM_CHANNELS, HEAD_QUEUE_SIZE, MID_QUEUE_SIZE, HIER_CULLING, NEW_CULLING><<<grid, {16, 4, 4}>>>( \
 		ranges, point_list, W, H, bg_color, means2D, cov3D_inv, projmatrix_inv, (float3*) cam_pos, conic_opacity, \
 		colors, final_Ts, n_contrib, pixel_colors, dL_dpixels, dL_dmean2D, dL_dconic2D, dL_dopacity, dL_dcolors, focal_x, focal_y, partialprojmatrix_inv)
 
-#define CALL_HIER_HEAD(HIER_CULLING, MID_QUEUE_SIZE) \
+#define CALL_HIER_HEAD(HIER_CULLING, NEW_CULLING, MID_QUEUE_SIZE) \
 	switch (sort_settings.queue_sizes.per_pixel) \
 	{ \
-		case 4: { CALL_HIER(HIER_CULLING, MID_QUEUE_SIZE, 4); break; } \
-		case 8: { CALL_HIER(HIER_CULLING, MID_QUEUE_SIZE, 8); break; } \
-		case 12: { CALL_HIER(HIER_CULLING, MID_QUEUE_SIZE, 12); break; } \
-		case 16: { CALL_HIER(HIER_CULLING, MID_QUEUE_SIZE, 16); break; } \
+		case 4: { CALL_HIER(HIER_CULLING, NEW_CULLING, MID_QUEUE_SIZE, 4); break; } \
+		case 8: { CALL_HIER(HIER_CULLING, NEW_CULLING, MID_QUEUE_SIZE, 8); break; } \
+		case 12: { CALL_HIER(HIER_CULLING, NEW_CULLING, MID_QUEUE_SIZE, 12); break; } \
+		case 16: { CALL_HIER(HIER_CULLING, NEW_CULLING, MID_QUEUE_SIZE, 16); break; } \
 		default: { throw std::runtime_error("Not supported head queue size " + std::to_string(sort_settings.queue_sizes.per_pixel)); } \
 	}
 
-#define CALL_HIER_MID(HIER_CULLING) \
+#define CALL_HIER_MID(HIER_CULLING, NEW_CULLING) \
 	switch (sort_settings.queue_sizes.tile_2x2) \
 	{ \
-		case 8: { CALL_HIER_HEAD(HIER_CULLING, 8); break; } \
-		case 12: { CALL_HIER_HEAD(HIER_CULLING, 12); break; } \
-		case 20: { CALL_HIER_HEAD(HIER_CULLING, 20); break; } \
+		case 8: { CALL_HIER_HEAD(HIER_CULLING, NEW_CULLING, 8); break; } \
+		case 12: { CALL_HIER_HEAD(HIER_CULLING, NEW_CULLING, 12); break; } \
+		case 20: { CALL_HIER_HEAD(HIER_CULLING, NEW_CULLING, 20); break; } \
 		default: { throw std::runtime_error("Not supported mid queue size " + std::to_string(sort_settings.queue_sizes.tile_2x2)); } \
 	}
 
 	if (culling_settings.hierarchical_4x4_culling) {
-		CALL_HIER_MID(true);
+		if (culling_settings.new_culling) {
+			CALL_HIER_MID(true, true);
+		} else {
+			CALL_HIER_MID(true, false);
+		}
 	} else {
-		CALL_HIER_MID(false);
+		if (culling_settings.new_culling) {
+			CALL_HIER_MID(false, true);
+		} else {
+			CALL_HIER_MID(false, false);
+		}
 	}
 
 #undef CALL_HIER_MID

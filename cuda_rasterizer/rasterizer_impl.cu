@@ -288,6 +288,7 @@ int CudaRasterizer::Rasterizer::forward(
 		cov3D_precomp,
 		colors_precomp,
 		viewmatrix, projmatrix,
+		inv_viewprojmatrix,
 		(glm::vec3*)cam_pos,
 		width, height,
 		focal_x, focal_y,
@@ -336,7 +337,9 @@ int CudaRasterizer::Rasterizer::forward(
 		width, height,
 		binningState.point_list_keys_unsorted,
 		binningState.point_list_unsorted,
-		tile_grid);
+		tile_grid,
+		focal_x, focal_y,
+		viewmatrix);
 	CHECK_CUDA(, debug)
 
 	timer();

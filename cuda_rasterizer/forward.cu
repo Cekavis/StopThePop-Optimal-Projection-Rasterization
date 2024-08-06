@@ -65,7 +65,7 @@ __global__ void duplicateWithKeysCUDA(
 }
 
 // Perform initial steps for each Gaussian prior to rasterization.
-template<int C, bool TILE_BASED_CULLING, bool LOAD_BALANCING>
+template<int C, bool TILE_BASED_CULLING, bool LOAD_BALANCING, bool NEW_CULLING>
 __global__ void preprocessCUDA(int P, int D, int M,
 	const float* orig_points,
 	const glm::vec3* scales,
@@ -78,6 +78,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	const float* colors_precomp,
 	const float* viewmatrix,
 	const float* projmatrix,
+	const float* partialprojmatrix_inv,
 	const glm::vec3* cam_pos,
 	const int W, int H,
 	const float tan_fovx, float tan_fovy,
@@ -188,10 +189,12 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	if constexpr(TILE_BASED_CULLING && LOAD_BALANCING)
 		if (__ballot_sync(WARP_MASK, active) == 0) // early stop if whole warp culled
 			return;
+
+	const glm::mat4 inverse_p = loadMatrix4x4(partialprojmatrix_inv);
 	
 	int tile_count;
 	if constexpr (TILE_BASED_CULLING)
-		tile_count = computeTilebasedCullingTileCount<LOAD_BALANCING>(active, co, mean2D, opacity_power_threshold, rect_min, rect_max);
+		tile_count = computeTilebasedCullingTileCount<LOAD_BALANCING, NEW_CULLING>(active, co, mean2D, opacity_power_threshold, rect_min, rect_max, W, H, max(500.0f, focal_x), max(500.0f, focal_y), inverse_p);
 	else
 		tile_count = tile_count_rect;
 
@@ -531,49 +534,57 @@ void FORWARD::render(
 		cudaMalloc((void**)&partialprojmatrix_inv, 16 * sizeof(float));
 		cudaMemcpy(partialprojmatrix_inv, c, 16 * sizeof(float), cudaMemcpyHostToDevice);
 		
-#define CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, DEBUG) sortGaussiansRayHierarchicalCUDA_forward<NUM_CHANNELS, HEAD_QUEUE_SIZE, MID_QUEUE_SIZE, HIER_CULLING, DEBUG><<<grid, {16, 4, 4}>>>( \
+#define CALL_HIER_DEBUG(HIER_CULLING, NEW_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, DEBUG) sortGaussiansRayHierarchicalCUDA_forward<NUM_CHANNELS, HEAD_QUEUE_SIZE, MID_QUEUE_SIZE, HIER_CULLING, NEW_CULLING, DEBUG><<<grid, {16, 4, 4}>>>( \
 	ranges, point_list, W, H, means2D, cov3D_inv, projmatrix_inv, (float3 *)cam_pos, colors, conic_opacity, final_T, n_contrib, bg_color, debugVisualization.type, out_color, focal_x, focal_y, partialprojmatrix_inv)
 
-#define CALL_HIER(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE) if (debugVisualization.type == DebugVisualization::Disabled) { CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, false); } else { CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, true); }
+#define CALL_HIER(HIER_CULLING, NEW_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE) if (debugVisualization.type == DebugVisualization::Disabled) { CALL_HIER_DEBUG(HIER_CULLING, NEW_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, false); } else { CALL_HIER_DEBUG(HIER_CULLING, NEW_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, true); }
 
 #ifdef STOPTHEPOP_FASTBUILD
-#define CALL_HIER_HEAD(HIER_CULLING, MID_QUEUE_SIZE) \
+#define CALL_HIER_HEAD(HIER_CULLING, NEW_CULLING, MID_QUEUE_SIZE) \
 	switch (splatting_settings.sort_settings.queue_sizes.per_pixel) \
 	{ \
-		case 4: { CALL_HIER(HIER_CULLING, MID_QUEUE_SIZE, 4); break; } \
+		case 4: { CALL_HIER(HIER_CULLING, NEW_CULLING, MID_QUEUE_SIZE, 4); break; } \
 		default: { throw std::runtime_error("Not supported head queue size"); } \
 	}
 
-#define CALL_HIER_MID(HIER_CULLING) \
+#define CALL_HIER_MID(HIER_CULLING, NEW_CULLING) \
 	switch (splatting_settings.sort_settings.queue_sizes.tile_2x2) \
 	{ \
-		case 8: { CALL_HIER_HEAD(HIER_CULLING, 8); break; } \
+		case 8: { CALL_HIER_HEAD(HIER_CULLING, NEW_CULLING, 8); break; } \
 		default: { throw std::runtime_error("Not supported mid queue size"); } \
 	}
 #else // STOPTHEPOP_FASTBUILD
-#define CALL_HIER_HEAD(HIER_CULLING, MID_QUEUE_SIZE) \
+#define CALL_HIER_HEAD(HIER_CULLING, NEW_CULLING, MID_QUEUE_SIZE) \
 	switch (splatting_settings.sort_settings.queue_sizes.per_pixel) \
 	{ \
-		case 4: { CALL_HIER(HIER_CULLING, MID_QUEUE_SIZE, 4); break; } \
-		case 8: { CALL_HIER(HIER_CULLING, MID_QUEUE_SIZE, 8); break; } \
-		case 16: { CALL_HIER(HIER_CULLING, MID_QUEUE_SIZE, 16); break; } \
+		case 4: { CALL_HIER(HIER_CULLING, NEW_CULLING, MID_QUEUE_SIZE, 4); break; } \
+		case 8: { CALL_HIER(HIER_CULLING, NEW_CULLING, MID_QUEUE_SIZE, 8); break; } \
+		case 16: { CALL_HIER(HIER_CULLING, NEW_CULLING, MID_QUEUE_SIZE, 16); break; } \
 		default: { throw std::runtime_error("Not supported head queue size"); } \
 	}
 
-#define CALL_HIER_MID(HIER_CULLING) \
+#define CALL_HIER_MID(HIER_CULLING, NEW_CULLING) \
 	switch (splatting_settings.sort_settings.queue_sizes.tile_2x2) \
 	{ \
-		case 8: { CALL_HIER_HEAD(HIER_CULLING, 8); break; } \
-		case 12: { CALL_HIER_HEAD(HIER_CULLING, 12); break; } \
-		case 20: { CALL_HIER_HEAD(HIER_CULLING, 20); break; } \
+		case 8: { CALL_HIER_HEAD(HIER_CULLING, NEW_CULLING, 8); break; } \
+		case 12: { CALL_HIER_HEAD(HIER_CULLING, NEW_CULLING, 12); break; } \
+		case 20: { CALL_HIER_HEAD(HIER_CULLING, NEW_CULLING, 20); break; } \
 		default: { throw std::runtime_error("Not supported mid queue size"); } \
 	}
 #endif // STOPTHEPOP_FASTBUILD
 
 	if (splatting_settings.culling_settings.hierarchical_4x4_culling) {
-		CALL_HIER_MID(true);
+		if (splatting_settings.culling_settings.new_culling) {
+			CALL_HIER_MID(true, true);
+		} else {
+			CALL_HIER_MID(true, false);
+		}
 	} else {
-		CALL_HIER_MID(false);
+		if (splatting_settings.culling_settings.new_culling) {
+			CALL_HIER_MID(false, true);
+		} else {
+			CALL_HIER_MID(false, false);
+		}
 	}
 
 #undef CALL_HIER_MID
@@ -595,6 +606,7 @@ void FORWARD::preprocess(int P, int D, int M,
 	const float* colors_precomp,
 	const float* viewmatrix,
 	const float* projmatrix,
+	const float* inv_viewprojmatrix,
 	const glm::vec3* cam_pos,
 	const int W, int H,
 	const float focal_x, float focal_y,
@@ -612,8 +624,21 @@ void FORWARD::preprocess(int P, int D, int M,
 	uint32_t* tiles_touched,
 	bool prefiltered)
 {
-#define PREPROCESS_CALL(TBC, LB) \
-	preprocessCUDA<NUM_CHANNELS, TBC, LB> << <(P + 255) / 256, 256 >> > ( \
+	
+	// Compute the inverse of the projection matrix
+	float a[16], b[16], c[16];
+	cudaMemcpy(a, inv_viewprojmatrix, 16 * sizeof(float), cudaMemcpyDeviceToHost);
+	cudaMemcpy(b, viewmatrix, 16 * sizeof(float), cudaMemcpyDeviceToHost);
+	memset(c, 0, 16 * sizeof(float));
+	for (int i = 0; i < 4; i++) for (int k = 0; k < 4; k++) for (int j = 0; j < 4; j++)
+		c[i * 4 + j] += a[i * 4 + k] * b[k * 4 + j];
+
+	float* partialprojmatrix_inv;
+	cudaMalloc((void**)&partialprojmatrix_inv, 16 * sizeof(float));
+	cudaMemcpy(partialprojmatrix_inv, c, 16 * sizeof(float), cudaMemcpyHostToDevice);
+
+#define PREPROCESS_CALL(TBC, LB, NEW_CULLING) \
+	preprocessCUDA<NUM_CHANNELS, TBC, LB, NEW_CULLING> << <(P + 255) / 256, 256 >> > ( \
 		P, D, M, \
 		means3D, \
 		scales, \
@@ -626,6 +651,7 @@ void FORWARD::preprocess(int P, int D, int M,
 		colors_precomp, \
 		viewmatrix,  \
 		projmatrix, \
+		partialprojmatrix_inv, \
 		cam_pos, \
 		W, H, \
 		tan_fovx, tan_fovy, \
@@ -647,20 +673,41 @@ void FORWARD::preprocess(int P, int D, int M,
 		prefiltered \
 		);
 
-	if (splatting_settings.culling_settings.tile_based_culling)
-	{
-		if (splatting_settings.load_balancing) {
-			PREPROCESS_CALL(true, true);
-		} else {
-			PREPROCESS_CALL(true, false);
+	if (splatting_settings.culling_settings.new_culling) {
+		if (splatting_settings.culling_settings.tile_based_culling)
+		{
+			if (splatting_settings.load_balancing) {
+				PREPROCESS_CALL(true, true, true);
+			} else {
+				PREPROCESS_CALL(true, false, true);
+			}
+		}
+		else
+		{
+			if (splatting_settings.load_balancing) {
+				PREPROCESS_CALL(false, true, true);
+			} else {
+				PREPROCESS_CALL(false, false, true);
+			}
 		}
 	}
 	else
 	{
-		if (splatting_settings.load_balancing) {
-			PREPROCESS_CALL(false, true);
-		} else {
-			PREPROCESS_CALL(false, false);
+		if (splatting_settings.culling_settings.tile_based_culling)
+		{
+			if (splatting_settings.load_balancing) {
+				PREPROCESS_CALL(true, true, false);
+			} else {
+				PREPROCESS_CALL(true, false, false);
+			}
+		}
+		else
+		{
+			if (splatting_settings.load_balancing) {
+				PREPROCESS_CALL(false, true, false);
+			} else {
+				PREPROCESS_CALL(false, false, false);
+			}
 		}
 	}
 
@@ -682,12 +729,26 @@ void FORWARD::duplicate(int P,
 						const int W, int H,
 						uint64_t *gaussian_keys_unsorted,
 						uint32_t *gaussian_values_unsorted,
-						dim3 grid)
+						dim3 grid,
+						const float focal_x, const float focal_y,
+						const float *viewmatrix)
 {
+	// Compute the inverse of the projection matrix
+	float a[16], b[16], c[16];
+	cudaMemcpy(a, inv_viewprojmatrix, 16 * sizeof(float), cudaMemcpyDeviceToHost);
+	cudaMemcpy(b, viewmatrix, 16 * sizeof(float), cudaMemcpyDeviceToHost);
+	memset(c, 0, 16 * sizeof(float));
+	for (int i = 0; i < 4; i++) for (int k = 0; k < 4; k++) for (int j = 0; j < 4; j++)
+		c[i * 4 + j] += a[i * 4 + k] * b[k * 4 + j];
+
+	float* partialprojmatrix_inv;
+	cudaMalloc((void**)&partialprojmatrix_inv, 16 * sizeof(float));
+	cudaMemcpy(partialprojmatrix_inv, c, 16 * sizeof(float), cudaMemcpyHostToDevice);
+
 	// For each instance to be rendered, produce adequate [ tile | depth ] key 
 	// and corresponding dublicated Gaussian indices to be sorted
-	#define CALL_DUPLICATE_EXTENDED(TBC, LB, SORT_ORDER) \
-		duplicateWithKeys_extended<TBC, LB, SORT_ORDER> << <(P + 255) / 256, 256 >> > ( \
+	#define CALL_DUPLICATE_EXTENDED(TBC, LB, SORT_ORDER, NEW_CULLING) \
+		duplicateWithKeys_extended<TBC, LB, SORT_ORDER, NEW_CULLING> << <(P + 255) / 256, 256 >> > ( \
 				P, \
 				means2D, \
 				depths, \
@@ -702,21 +763,41 @@ void FORWARD::duplicate(int P,
 				gaussian_values_unsorted, \
 				radii, \
 				rects2D, \
-				grid)
+				grid, \
+				focal_x, focal_y, \
+				partialprojmatrix_inv)
 
 	#define CALL_DUPLICATE_SORT_ORDER(SORT_ORDER) \
-		if (splatting_settings.culling_settings.tile_based_culling) \
+		if (splatting_settings.culling_settings.new_culling) \
 		{ \
-			if (splatting_settings.load_balancing) { \
-				CALL_DUPLICATE_EXTENDED(true, true, SORT_ORDER); \
+			if (splatting_settings.culling_settings.tile_based_culling) \
+			{ \
+				if (splatting_settings.load_balancing) { \
+					CALL_DUPLICATE_EXTENDED(true, true, SORT_ORDER, true); \
+				} else { \
+					CALL_DUPLICATE_EXTENDED(true, false, SORT_ORDER, true); \
+				} \
 			} else { \
-				CALL_DUPLICATE_EXTENDED(true, false, SORT_ORDER); \
+				if (splatting_settings.load_balancing) { \
+					CALL_DUPLICATE_EXTENDED(false, true, SORT_ORDER, true); \
+				} else { \
+					CALL_DUPLICATE_EXTENDED(false, false, SORT_ORDER, true); \
+				} \
 			} \
 		} else { \
-			if (splatting_settings.load_balancing) { \
-				CALL_DUPLICATE_EXTENDED(false, true, SORT_ORDER); \
+			if (splatting_settings.culling_settings.tile_based_culling) \
+			{ \
+				if (splatting_settings.load_balancing) { \
+					CALL_DUPLICATE_EXTENDED(true, true, SORT_ORDER, false); \
+				} else { \
+					CALL_DUPLICATE_EXTENDED(true, false, SORT_ORDER, false); \
+				} \
 			} else { \
-				CALL_DUPLICATE_EXTENDED(false, false, SORT_ORDER); \
+				if (splatting_settings.load_balancing) { \
+					CALL_DUPLICATE_EXTENDED(false, true, SORT_ORDER, false); \
+				} else { \
+					CALL_DUPLICATE_EXTENDED(false, false, SORT_ORDER, false); \
+				} \
 			} \
 		}
 

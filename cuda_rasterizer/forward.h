@@ -36,6 +36,7 @@ namespace FORWARD
 		const float* colors_precomp,
 		const float* viewmatrix,
 		const float* projmatrix,
+		const float* inv_viewprojmatrix,
 		const glm::vec3* cam_pos,
 		const int W, int H,
 		const float focal_x, float focal_y,
@@ -68,7 +69,9 @@ namespace FORWARD
 		const int W, int H,
 		uint64_t *gaussian_keys_unsorted,
 		uint32_t *gaussian_values_unsorted,
-		dim3 grid);
+		dim3 grid,
+		const float focal_x, const float focal_y,
+		const float *viewmatrix);
 
 	// Main rasterization method.
 	void render(

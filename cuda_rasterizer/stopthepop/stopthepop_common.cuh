@@ -455,7 +455,8 @@ __global__ void duplicateWithKeys_extended(
 	uint32_t* __restrict__ gaussian_values_unsorted,
 	const int* __restrict__ radii,
 	const float2* __restrict__ rects,
-	dim3 grid)
+	dim3 grid,
+	uint32_t* visibilityMask)
 {	
 	auto block = cg::this_thread_block();
 	auto warp = cg::tiled_partition<WARP_SIZE>(block);
@@ -544,6 +545,10 @@ __global__ void duplicateWithKeys_extended(
 							 const float3 cov3D_inv3,
 							 float& depth)
 		{
+			uint32_t idx = x * grid.y + y;
+			if (!(visibilityMask[idx / 32] >> (idx % 32) & 1))
+				return false;
+
 			const glm::vec2 tile_min(x * BLOCK_X, y * BLOCK_Y);
 			const glm::vec2 tile_max((x + 1) * BLOCK_X - 1, (y + 1) * BLOCK_Y - 1);
 
@@ -694,7 +699,7 @@ __global__ void duplicateWithKeys_extended(
 			const uint32_t write = active_curr_it && write_tile;
 
 			uint32_t n_writes, write_offset;
-			if constexpr (!TILE_BASED_CULLING)
+			if constexpr (!TILE_BASED_CULLING && false)
 			{
 				n_writes = WARP_SIZE;
 				write_offset = off_coop + lane_idx;

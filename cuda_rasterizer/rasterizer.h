@@ -217,7 +217,9 @@ namespace CudaRasterizer
 			const bool prefiltered,
 			float* out_color,
 			int* radii = nullptr,
-			bool debug = false);
+			bool debug = false,
+			uint32_t* visibilityMask = nullptr,
+			uint32_t* visibilityMaskSum = nullptr);
 
 		static void backward(
 			const int P, int D, int M, int R,

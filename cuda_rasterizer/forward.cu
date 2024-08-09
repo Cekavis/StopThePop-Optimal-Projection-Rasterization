@@ -96,7 +96,9 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	float4* conic_opacity,
 	const dim3 grid,
 	uint32_t* tiles_touched,
-	bool prefiltered)
+	bool prefiltered,
+	uint32_t* visibilityMask,
+	uint32_t* visibilityMaskSum)
 {
 #define RETURN_OR_INACTIVE() if constexpr(TILE_BASED_CULLING && LOAD_BALANCING) { active = false; } else { return; }
 
@@ -193,7 +195,25 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	if constexpr (TILE_BASED_CULLING)
 		tile_count = computeTilebasedCullingTileCount<LOAD_BALANCING>(active, co, mean2D, opacity_power_threshold, rect_min, rect_max);
 	else
-		tile_count = tile_count_rect;
+	{
+		// tile_count = tile_count_rect;
+
+		tile_count = visibilityMaskSum[rect_max.x * (grid.y + 1) + rect_max.y]
+				   - visibilityMaskSum[rect_max.x * (grid.y + 1) + rect_min.y]
+				   - visibilityMaskSum[rect_min.x * (grid.y + 1) + rect_max.y]
+				   + visibilityMaskSum[rect_min.x * (grid.y + 1) + rect_min.y];
+
+		// tile_count = 0;
+		// for (int x = rect_min.x; x < rect_max.x; x++)
+		// {
+		// 	for (int y = rect_min.y; y < rect_max.y; y++)
+		// 	{
+		// 		const uint32_t idx = x * grid.y + y;
+		// 		if (visibilityMask[idx / 32] >> (idx % 32) & 1)
+		// 			tile_count++;
+		// 	}
+		// }
+	}
 
 
 	if (tile_count == 0 || !active) // Cooperative threads no longer needed (after load balancing)
@@ -576,6 +596,8 @@ void FORWARD::render(
 		CALL_HIER_MID(false);
 	}
 
+	cudaFree(partialprojmatrix_inv);
+
 #undef CALL_HIER_MID
 #undef CALL_HIER_HEAD
 #undef CALL_HIER
@@ -610,7 +632,9 @@ void FORWARD::preprocess(int P, int D, int M,
 	float4* conic_opacity,
 	const dim3 grid,
 	uint32_t* tiles_touched,
-	bool prefiltered)
+	bool prefiltered,
+	uint32_t* visibilityMask,
+	uint32_t* visibilityMaskSum)
 {
 #define PREPROCESS_CALL(TBC, LB) \
 	preprocessCUDA<NUM_CHANNELS, TBC, LB> << <(P + 255) / 256, 256 >> > ( \
@@ -644,7 +668,9 @@ void FORWARD::preprocess(int P, int D, int M,
 		conic_opacity, \
 		grid, \
 		tiles_touched, \
-		prefiltered \
+		prefiltered, \
+		visibilityMask, \
+		visibilityMaskSum \
 		);
 
 	if (splatting_settings.culling_settings.tile_based_culling)
@@ -682,7 +708,8 @@ void FORWARD::duplicate(int P,
 						const int W, int H,
 						uint64_t *gaussian_keys_unsorted,
 						uint32_t *gaussian_values_unsorted,
-						dim3 grid)
+						dim3 grid,
+						uint32_t* visibilityMask)
 {
 	// For each instance to be rendered, produce adequate [ tile | depth ] key 
 	// and corresponding dublicated Gaussian indices to be sorted
@@ -702,7 +729,8 @@ void FORWARD::duplicate(int P,
 				gaussian_values_unsorted, \
 				radii, \
 				rects2D, \
-				grid)
+				grid, \
+				visibilityMask)
 
 	#define CALL_DUPLICATE_SORT_ORDER(SORT_ORDER) \
 		if (splatting_settings.culling_settings.tile_based_culling) \

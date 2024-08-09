@@ -243,7 +243,9 @@ int CudaRasterizer::Rasterizer::forward(
 	const bool prefiltered,
 	float* out_color,
 	int* radii,
-	bool debug)
+	bool debug,
+	uint32_t* visibilityMask,
+	uint32_t* visibilityMaskSum)
 {
 	static Timer timer({ "Preprocess", "Duplicate", "Sort", "Render" });
 	timer.setActive(debugVisualization.timing_enabled);
@@ -303,7 +305,9 @@ int CudaRasterizer::Rasterizer::forward(
 		geomState.conic_opacity,
 		tile_grid,
 		geomState.tiles_touched,
-		prefiltered
+		prefiltered,
+		visibilityMask,
+		visibilityMaskSum
 	), debug)
 
 	timer();
@@ -336,7 +340,9 @@ int CudaRasterizer::Rasterizer::forward(
 		width, height,
 		binningState.point_list_keys_unsorted,
 		binningState.point_list_unsorted,
-		tile_grid);
+		tile_grid,
+		visibilityMask);
+	}
 	CHECK_CUDA(, debug)
 
 	timer();

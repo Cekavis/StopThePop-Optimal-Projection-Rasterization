@@ -51,7 +51,9 @@ namespace FORWARD
 		float4* conic_opacity,
 		const dim3 grid,
 		uint32_t* tiles_touched,
-		bool prefiltered);
+		bool prefiltered,
+		uint32_t* visibilityMask,
+		uint32_t* visibilityMaskSum);
 
 	void duplicate(int P,
 		const float2 *means2D,
@@ -68,7 +70,8 @@ namespace FORWARD
 		const int W, int H,
 		uint64_t *gaussian_keys_unsorted,
 		uint32_t *gaussian_values_unsorted,
-		dim3 grid);
+		dim3 grid,
+		uint32_t* visibilityMask);
 
 	// Main rasterization method.
 	void render(

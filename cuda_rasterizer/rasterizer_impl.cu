@@ -534,3 +534,46 @@ void CudaRasterizer::Rasterizer::backward(
 		(glm::vec3*)dL_dscale,
 		(glm::vec4*)dL_drot), debug)
 }
+
+__global__ void blendCUDA(
+	const float* src,
+	int w_src, int h_src,
+	float* dst,
+	int w, int h,
+	int cx, int cy,
+	float ratio
+)
+{
+	int c = blockIdx.y;
+	int idx = blockIdx.x * blockDim.x + threadIdx.x;
+	if (idx >= w_src * h_src)
+		return;
+
+	int x = idx % w_src;
+	int y = idx / w_src;
+
+	float dx = (x + 0.5f) / w_src;
+	float dy = (y + 0.5f) / h_src;
+	float alpha = fminf(fminf(fminf(dx, dy), 1 - dx), 1 - dy);
+	alpha = fminf(1.0f, alpha / ratio);
+
+	dst[c * w * h + (cy + y) * w + cx + x] = alpha * 	   src[c * w_src * h_src + y * w_src + x]
+										   + (1 - alpha) * dst[c * w * h + (cy + y) * w + cx + x];
+}
+
+void CudaRasterizer::blend(
+	const float* src,
+	int w_src, int h_src,
+	float* dst,
+	int w, int h,
+	int cx, int cy,
+	float ratio
+)
+{
+	blendCUDA<<< {(unsigned int)(w_src * h_src / 256), 3}, 256 >>>(
+		src, w_src, h_src,
+		dst, w, h,
+		cx, cy,
+		ratio
+	);
+}

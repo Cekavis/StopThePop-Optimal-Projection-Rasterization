@@ -258,6 +258,15 @@ namespace CudaRasterizer
 			float* dL_drot,
 			bool debug);
 	};
+
+	void blend(
+		const float* src,
+		int w_src, int h_src,
+		float* dst,
+		int w, int h,
+		int cx, int cy,
+		float ratio
+	);
 };
 
 #endif

@@ -196,12 +196,13 @@ __global__ void preprocessCUDA(int P, int D, int M,
 		tile_count = computeTilebasedCullingTileCount<LOAD_BALANCING>(active, co, mean2D, opacity_power_threshold, rect_min, rect_max);
 	else
 	{
-		// tile_count = tile_count_rect;
-
-		tile_count = visibilityMaskSum[rect_max.x * (grid.y + 1) + rect_max.y]
-				   - visibilityMaskSum[rect_max.x * (grid.y + 1) + rect_min.y]
-				   - visibilityMaskSum[rect_min.x * (grid.y + 1) + rect_max.y]
-				   + visibilityMaskSum[rect_min.x * (grid.y + 1) + rect_min.y];
+		if (visibilityMaskSum == nullptr)
+			tile_count = tile_count_rect;
+		else
+			tile_count = visibilityMaskSum[rect_max.x * (grid.y + 1) + rect_max.y]
+					   - visibilityMaskSum[rect_max.x * (grid.y + 1) + rect_min.y]
+					   - visibilityMaskSum[rect_min.x * (grid.y + 1) + rect_max.y]
+					   + visibilityMaskSum[rect_min.x * (grid.y + 1) + rect_min.y];
 
 		// tile_count = 0;
 		// for (int x = rect_min.x; x < rect_max.x; x++)

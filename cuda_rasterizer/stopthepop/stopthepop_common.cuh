@@ -545,9 +545,12 @@ __global__ void duplicateWithKeys_extended(
 							 const float3 cov3D_inv3,
 							 float& depth)
 		{
-			uint32_t idx = x * grid.y + y;
-			if (!(visibilityMask[idx / 32] >> (idx % 32) & 1))
-				return false;
+			if (visibilityMask != nullptr)
+			{
+				uint32_t idx = x * grid.y + y;
+				if (!(visibilityMask[idx / 32] >> (idx % 32) & 1))
+					return false;
+			}
 
 			const glm::vec2 tile_min(x * BLOCK_X, y * BLOCK_Y);
 			const glm::vec2 tile_max((x + 1) * BLOCK_X - 1, (y + 1) * BLOCK_Y - 1);

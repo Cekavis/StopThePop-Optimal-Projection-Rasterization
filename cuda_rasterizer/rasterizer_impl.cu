@@ -22,6 +22,7 @@
 #include <cub/device/device_radix_sort.cuh>
 #define GLM_FORCE_CUDA
 #include <glm/glm.hpp>
+#include <nvtx3/nvtx3.hpp>
 
 #include <cooperative_groups.h>
 namespace cg = cooperative_groups;
@@ -247,6 +248,7 @@ int CudaRasterizer::Rasterizer::forward(
 	uint32_t* visibilityMask,
 	uint32_t* visibilityMaskSum)
 {
+	nvtx3::scoped_range range("Forward");
 	static Timer timer({ "Preprocess", "Duplicate", "Sort", "Render" });
 	timer.setActive(debugVisualization.timing_enabled);
 
@@ -278,6 +280,8 @@ int CudaRasterizer::Rasterizer::forward(
 	timer();
 
 	// Run preprocessing per-Gaussian (transformation, bounding, conversion of SHs to RGB)
+	{
+	nvtx3::scoped_range preprocessRange("Preprocess");
 	CHECK_CUDA(FORWARD::preprocess(
 		P, D, M,
 		means3D,
@@ -309,6 +313,7 @@ int CudaRasterizer::Rasterizer::forward(
 		visibilityMask,
 		visibilityMaskSum
 	), debug)
+	}
 
 	timer();
 
@@ -324,6 +329,8 @@ int CudaRasterizer::Rasterizer::forward(
 	char* binning_chunkptr = binningBuffer(binning_chunk_size);
 	BinningState binningState = BinningState::fromChunk(binning_chunkptr, num_rendered);
 
+	{
+	nvtx3::scoped_range duplicateRange("Duplicate");
 	FORWARD::duplicate(
 		P,
 		geomState.means2D,
@@ -350,12 +357,15 @@ int CudaRasterizer::Rasterizer::forward(
 	int bit = getHigherMsb(tile_grid.x * tile_grid.y);
 
 	// Sort complete list of (duplicated) Gaussian indices by keys
+	{
+	nvtx3::scoped_range sortRange("Sort");
 	CHECK_CUDA(cub::DeviceRadixSort::SortPairs(
 		binningState.list_sorting_space,
 		binningState.sorting_size,
 		binningState.point_list_keys_unsorted, binningState.point_list_keys,
 		binningState.point_list_unsorted, binningState.point_list,
 		num_rendered, 0, 32 + bit), debug)
+	}
 
 	CHECK_CUDA(cudaMemset(imgState.ranges, 0, tile_grid.x * tile_grid.y * sizeof(uint2)), debug);
 
@@ -371,6 +381,8 @@ int CudaRasterizer::Rasterizer::forward(
 
 	// Let each tile blend its range of Gaussians independently in parallel
 	const float* feature_ptr = colors_precomp != nullptr ? colors_precomp : geomState.rgb;
+	{
+	nvtx3::scoped_range renderRange("Render");
 	CHECK_CUDA(FORWARD::render(
 		tile_grid, block,
 		imgState.ranges,
@@ -391,6 +403,7 @@ int CudaRasterizer::Rasterizer::forward(
 		out_color, 
 		focal_x, focal_y,
 		viewmatrix), debug)
+	}
 
 	timer();
 

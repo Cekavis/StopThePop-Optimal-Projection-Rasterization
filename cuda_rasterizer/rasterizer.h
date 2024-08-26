@@ -14,7 +14,7 @@
 
 // Uncomment if you experience unreasonably long build times (only compile kernels for the default queue sizes)
 // Additionally, you can specify the exact CUDA_ARCHITECTURE in the CMakeLists.txt (default "70;75;86")
-// #define STOPTHEPOP_FASTBUILD
+#define STOPTHEPOP_FASTBUILD
 
 #include <vector>
 #include <functional>

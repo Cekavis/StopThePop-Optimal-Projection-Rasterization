@@ -105,10 +105,46 @@ __device__ glm::mat3 computeNaiveCov2D(const glm::vec3 p_view, float focal_x, fl
     return cov;
 }
 
+// Forward version of 2D covariance matrix computation
+__device__ glm::mat3 computeCov2D(const glm::vec3 p_view, float focal_x, float focal_y, float tan_fovx, float tan_fovy, const float* cov3D, const glm::mat4x3 viewmatrix)
+{
+	// The following models the steps outlined by equations 29
+	// and 31 in "EWA Splatting" (Zwicker et al., 2002). 
+	// Additionally considers aspect / scaling of viewport.
+	// Transposes used to account for row-/column-major conventions.
+	glm::vec3 t = p_view;
+
+	const float limx = 1.3f * tan_fovx;
+	const float limy = 1.3f * tan_fovy;
+	const float txtz = t.x / t.z;
+	const float tytz = t.y / t.z;
+	t.x = min(limx, max(-limx, txtz)) * t.z;
+	t.y = min(limy, max(-limy, tytz)) * t.z;
+
+	glm::mat3 J = glm::mat3(
+		focal_x / t.z, 0.0f, -(focal_x * t.x) / (t.z * t.z),
+		0.0f, focal_y / t.z, -(focal_y * t.y) / (t.z * t.z),
+		0, 0, 0);
+
+	glm::mat3 W = glm::transpose(glm::mat3(viewmatrix));
+	glm::mat3 T = W * J;
+
+	glm::mat3 Vrk = glm::mat3(
+		cov3D[0], cov3D[1], cov3D[2],
+		cov3D[1], cov3D[3], cov3D[4],
+		cov3D[2], cov3D[4], cov3D[5]);
+
+	glm::mat3 cov = glm::transpose(T) * glm::transpose(Vrk) * T;
+
+	// Apply low-pass filter: every Gaussian should be at least
+	// one pixel wide/high. Discard 3rd row and column.
+    return cov;
+}
+
 /**
  * Optimal Projection (When adapting to other cameras, no changes for codes are needed here, so the local affine approximation error will not be affected by the camera model.)
 */
-__device__ glm::mat3 computeCov2D(const glm::vec3 p_view, float focal_x, float focal_y, float tan_fovx, float tan_fovy, const float* cov3D, const glm::mat4x3 viewmatrix)
+__device__ glm::mat3 computeCov2D_optimal(const glm::vec3 p_view, float focal_x, float focal_y, float tan_fovx, float tan_fovy, const float* cov3D, const glm::mat4x3 viewmatrix)
 {
 
 	// The following models the steps outlined by equations 15

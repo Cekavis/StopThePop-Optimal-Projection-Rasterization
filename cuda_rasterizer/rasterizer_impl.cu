@@ -22,7 +22,7 @@
 #include <cub/device/device_radix_sort.cuh>
 #define GLM_FORCE_CUDA
 #include <glm/glm.hpp>
-#include <nvtx3/nvtx3.hpp>
+// #include <nvtx3/nvtx3.hpp>
 
 #include <cooperative_groups.h>
 namespace cg = cooperative_groups;
@@ -187,7 +187,10 @@ CudaRasterizer::GeometryState CudaRasterizer::GeometryState::fromChunk(char*& ch
 	obtain(chunk, geom.conic_opacity, P, 128);
 	obtain(chunk, geom.rgb, P * 3, 128);
 	obtain(chunk, geom.tiles_touched, P, 128);
-	cub::DeviceScan::InclusiveSum(nullptr, geom.scan_size, geom.tiles_touched, geom.tiles_touched, P);
+
+	size_t tmp = 0;
+	CHECK_CUDA(cub::DeviceScan::InclusiveSum(nullptr, tmp, geom.tiles_touched, geom.tiles_touched, P), true);
+	geom.scan_size = tmp;
 	obtain(chunk, geom.scanning_space, geom.scan_size, 128);
 	obtain(chunk, geom.point_offsets, P, 128);
 	return geom;
@@ -248,7 +251,7 @@ int CudaRasterizer::Rasterizer::forward(
 	uint32_t* visibilityMask,
 	uint32_t* visibilityMaskSum)
 {
-	nvtx3::scoped_range range("Forward");
+	// nvtx3::scoped_range range("Forward");
 	static Timer timer({ "Preprocess", "Duplicate", "Sort", "Render" });
 	timer.setActive(debugVisualization.timing_enabled);
 
@@ -281,7 +284,7 @@ int CudaRasterizer::Rasterizer::forward(
 
 	// Run preprocessing per-Gaussian (transformation, bounding, conversion of SHs to RGB)
 	{
-	nvtx3::scoped_range preprocessRange("Preprocess");
+	// nvtx3::scoped_range preprocessRange("Preprocess");
 	CHECK_CUDA(FORWARD::preprocess(
 		P, D, M,
 		means3D,
@@ -330,7 +333,7 @@ int CudaRasterizer::Rasterizer::forward(
 	BinningState binningState = BinningState::fromChunk(binning_chunkptr, num_rendered);
 
 	{
-	nvtx3::scoped_range duplicateRange("Duplicate");
+	// nvtx3::scoped_range duplicateRange("Duplicate");
 	FORWARD::duplicate(
 		P,
 		geomState.means2D,
@@ -358,7 +361,7 @@ int CudaRasterizer::Rasterizer::forward(
 
 	// Sort complete list of (duplicated) Gaussian indices by keys
 	{
-	nvtx3::scoped_range sortRange("Sort");
+	// nvtx3::scoped_range sortRange("Sort");
 	CHECK_CUDA(cub::DeviceRadixSort::SortPairs(
 		binningState.list_sorting_space,
 		binningState.sorting_size,
@@ -382,7 +385,7 @@ int CudaRasterizer::Rasterizer::forward(
 	// Let each tile blend its range of Gaussians independently in parallel
 	const float* feature_ptr = colors_precomp != nullptr ? colors_precomp : geomState.rgb;
 	{
-	nvtx3::scoped_range renderRange("Render");
+	// nvtx3::scoped_range renderRange("Render");
 	CHECK_CUDA(FORWARD::render(
 		tile_grid, block,
 		imgState.ranges,

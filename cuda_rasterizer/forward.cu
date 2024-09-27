@@ -65,7 +65,7 @@ __global__ void duplicateWithKeysCUDA(
 }
 
 // Perform initial steps for each Gaussian prior to rasterization.
-template<int C, bool TILE_BASED_CULLING, bool LOAD_BALANCING>
+template<int C, bool TILE_BASED_CULLING, bool LOAD_BALANCING, bool OPTIMAL_PROJECTION>
 __global__ void preprocessCUDA(int P, int D, int M,
 	const float* orig_points,
 	const glm::vec3* scales,
@@ -136,7 +136,9 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	}
 
 	// Compute 2D screen-space covariance matrix
-	glm::mat3 cov = computeCov2D(p_view, focal_x, focal_y, tan_fovx, tan_fovy, cov3D, viewmatrix_mat);
+	glm::mat3 cov = OPTIMAL_PROJECTION
+		? computeCov2D_optimal(p_view, focal_x, focal_y, tan_fovx, tan_fovy, cov3D, viewmatrix_mat) 
+		: computeCov2D(p_view, focal_x, focal_y, tan_fovx, tan_fovy, cov3D, viewmatrix_mat);
 	float opacity = opacities[idx];
 
 	float det, convolution_scaling_factor;
@@ -256,7 +258,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 // Main rasterization method. Collaboratively works on one tile per
 // block, each thread treats one pixel. Alternates between fetching 
 // and rasterizing data.
-template <uint32_t CHANNELS, bool ENABLE_DEBUG_VIZ>
+template <uint32_t CHANNELS, bool ENABLE_DEBUG_VIZ, bool OPTIMAL_PROJECTION>
 __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
 renderCUDA(
 	const uint2* __restrict__ ranges,
@@ -269,6 +271,7 @@ renderCUDA(
 	uint32_t* __restrict__ n_contrib,
 	const float* __restrict__ bg_color,
 	DebugVisualization debugVisualizationType,
+	const float* __restrict__ partialprojmatrix_inv,
 	const glm::vec3* cam_pos,
 	const glm::vec3* means3D,
 	float* __restrict__ out_color,
@@ -292,6 +295,8 @@ renderCUDA(
 	uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
 	const int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
 	int toDo = range.y - range.x;
+	
+	const glm::mat4 inverse_p  = loadMatrix4x4(partialprojmatrix_inv);
 
 	// Allocate storage for batches of collectively fetched data.
 	__shared__ int collected_id[BLOCK_SIZE];
@@ -307,23 +312,14 @@ renderCUDA(
 	[[maybe_unused]] float depth_accum = 0.f;
 	[[maybe_unused]] float currentDepth = -FLT_MAX;
 	[[maybe_unused]] float sortingErrorCount = 0.f;
-
-	const float cx = 0.5 * W - 0.5;
-	const float cy = 0.5 * H - 0.5;
-	const float inv_focal_x = 1.0f / focal_x;
-	const float inv_focal_y = 1.0f / focal_y;
 	// It needs to correspond to fx, fy in the function computeCov2D.
 	const float fx = max(512.f, focal_x);
 	const float fy = max(512.f, focal_y);
 
 	// Generate rays based on pixels (transformation from image space to ray space).
 	// modify to adapt to various camera models (here is for the pinhole camera)
-	float3 t = {
-		(pixf.x - cx) * inv_focal_x,
-		(pixf.y - cy) * inv_focal_y,
-		1
-	};
-
+	glm::vec3 t = pix2view(glm::vec2((float)pixf.x, (float)pixf.y), W, H, inverse_p);
+	
 	// Normalize the ray direction vector.
 	float theta = atan2(-t.y, sqrt(t.x * t.x + t.z * t.z)); 
 	float phi = atan2(t.x, t.z);
@@ -368,44 +364,48 @@ renderCUDA(
 			// Resample using conic matrix (cf. "Surface 
 			// Splatting" by Zwicker et al., 2001)
 			float2 xy = collected_xy[j];
-			
-			// Compute the tangent plane coordinates of the 2D Gaussian mean.
-			float3 mu = {
-				(xy.x - cx) * inv_focal_x,
-				(xy.y - cy) * inv_focal_y,
-				1
-			};
+			float2 d;
 
-			theta = atan2(-mu.y, sqrt(mu.x * mu.x + mu.z * mu.z)); 
-			phi = atan2(mu.x, mu.z);
-			
-			sin_phi = sin(phi);
-			cos_phi = cos(phi);
-
-			sin_theta = sin(theta);
-			cos_theta = cos(theta);
-
-			mu = {
-				cos_theta * sin_phi,
-				-sin_theta,
-				cos_theta * cos_phi
-			};
-
-			// Determine whether the Gaussian mean and the pixel ray are in the same hemisphere.
-			if (mu.x * t.x + mu.y * t.y + mu.z * t.z < 0.0000001f)  // 0.0000001f
+			if constexpr(OPTIMAL_PROJECTION)
 			{
-				continue;
+					// Compute the tangent plane coordinates of the 2D Gaussian mean.
+				glm::vec3 mu = pix2view(glm::vec2(xy.x, xy.y), W, H, inverse_p);
+
+				theta = atan2(-mu.y, sqrt(mu.x * mu.x + mu.z * mu.z)); 
+				phi = atan2(mu.x, mu.z);
+				
+				sin_phi = sin(phi);
+				cos_phi = cos(phi);
+
+				sin_theta = sin(theta);
+				cos_theta = cos(theta);
+
+				mu = {
+					cos_theta * sin_phi,
+					-sin_theta,
+					cos_theta * cos_phi
+				};
+
+				// Determine whether the Gaussian mean and the pixel ray are in the same hemisphere.
+				if (mu.x * t.x + mu.y * t.y + mu.z * t.z < 0.0000001f)  // 0.0000001f
+				{
+					continue;
+				}
+
+				float u_xy = 0.0f;
+				float v_xy = 0.0f;
+
+				float uv_pixf_inv = 1.f / (mu.x * t.x + mu.y * t.y + mu.z * t.z);
+
+				float u_pixf = fx * (t.x * cos_phi - t.z * sin_phi) * uv_pixf_inv;
+				float v_pixf = fy * (t.x * sin_phi * sin_theta + t.y * cos_theta + t.z * sin_theta * cos_phi) * uv_pixf_inv;
+
+				d = { u_xy - u_pixf, v_xy - v_pixf };
 			}
-
-			float u_xy = 0.0f;
-			float v_xy = 0.0f;
-
-			float uv_pixf_inv = 1.f / (mu.x * t.x + mu.y * t.y + mu.z * t.z);
-
-			float u_pixf = fx * (t.x * cos_phi - t.z * sin_phi) * uv_pixf_inv;
-			float v_pixf = fy * (t.x * sin_phi * sin_theta + t.y * cos_theta + t.z * sin_theta * cos_phi) * uv_pixf_inv;
-
-			float2 d = { u_xy - u_pixf, v_xy - v_pixf };
+			else
+			{
+				d = { xy.x - pixf.x, xy.y - pixf.y };
+			}
 
 			float4 con_o = collected_conic_opacity[j];
 			float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
@@ -420,11 +420,6 @@ renderCUDA(
 			if (alpha < 1.0f / 255.0f)
 				continue;
 			float test_T = T * (1 - alpha);
-			if (test_T < 0.0001f)
-			{
-				done = true;
-				continue;
-			}
 
 			// Eq. (3) from 3D Gaussian splatting paper.
 			for (int ch = 0; ch < CHANNELS; ch++)
@@ -437,6 +432,11 @@ renderCUDA(
 			}
 
 			T = test_T;
+			if (test_T < 0.01f)
+			{
+				done = true;
+				continue;
+			}
 
 			// Keep track of last range entry to update this
 			// pixel.
@@ -482,15 +482,37 @@ void FORWARD::render(
 	float focal_x, float focal_y,
 	const float* viewmatrix)
 {
+		// Compute the inverse of the projection matrix
+		float a[16], b[16], c[16];
+		cudaMemcpy(a, projmatrix_inv, 16 * sizeof(float), cudaMemcpyDeviceToHost);
+		cudaMemcpy(b, viewmatrix, 16 * sizeof(float), cudaMemcpyDeviceToHost);
+		memset(c, 0, 16 * sizeof(float));
+		for (int i = 0; i < 4; i++) for (int k = 0; k < 4; k++) for (int j = 0; j < 4; j++)
+			c[i * 4 + j] += a[i * 4 + k] * b[k * 4 + j];
+
+		float* partialprojmatrix_inv;
+		cudaMalloc((void**)&partialprojmatrix_inv, 16 * sizeof(float));
+		cudaMemcpy(partialprojmatrix_inv, c, 16 * sizeof(float), cudaMemcpyHostToDevice);
 
 	if (splatting_settings.sort_settings.sort_mode == SortMode::GLOBAL)
 	{
-		#define CALL_VANILLA(ENABLE_DEBUG_VIZ) renderCUDA<NUM_CHANNELS, ENABLE_DEBUG_VIZ> <<<grid, block>>> (ranges, point_list, W, H, means2D, colors, conic_opacity, final_T, n_contrib, bg_color, debugVisualization.type, cam_pos, (glm::vec3*)means3D, out_color, focal_x, focal_y)
+		#define CALL_VANILLA(ENABLE_DEBUG_VIZ, OP) renderCUDA<NUM_CHANNELS, ENABLE_DEBUG_VIZ, OP> <<<grid, block>>> (ranges, point_list, W, H, means2D, colors, conic_opacity, final_T, n_contrib, bg_color, debugVisualization.type, partialprojmatrix_inv, cam_pos, (glm::vec3*)means3D, out_color, focal_x, focal_y)
 
-		if (debugVisualization.type == DebugVisualization::Disabled) {
-			CALL_VANILLA(false);
-		} else {
-			CALL_VANILLA(true);
+		if (splatting_settings.optimal_projection)
+		{
+			if (debugVisualization.type == DebugVisualization::Disabled) {
+				CALL_VANILLA(false, true);
+			} else {
+				CALL_VANILLA(true, true);
+			}
+		}
+		else
+		{
+			if (debugVisualization.type == DebugVisualization::Disabled) {
+				CALL_VANILLA(false, false);
+			} else {
+				CALL_VANILLA(true, false);
+			}
 		}
 
 		#undef CALL_VANILLA
@@ -540,17 +562,6 @@ void FORWARD::render(
 	}
 	else if (splatting_settings.sort_settings.sort_mode == SortMode::HIERARCHICAL)
 	{
-		// Compute the inverse of the projection matrix
-		float a[16], b[16], c[16];
-		cudaMemcpy(a, projmatrix_inv, 16 * sizeof(float), cudaMemcpyDeviceToHost);
-		cudaMemcpy(b, viewmatrix, 16 * sizeof(float), cudaMemcpyDeviceToHost);
-		memset(c, 0, 16 * sizeof(float));
-		for (int i = 0; i < 4; i++) for (int k = 0; k < 4; k++) for (int j = 0; j < 4; j++)
-			c[i * 4 + j] += a[i * 4 + k] * b[k * 4 + j];
-
-		float* partialprojmatrix_inv;
-		cudaMalloc((void**)&partialprojmatrix_inv, 16 * sizeof(float));
-		cudaMemcpy(partialprojmatrix_inv, c, 16 * sizeof(float), cudaMemcpyHostToDevice);
 		
 #define CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, DEBUG) sortGaussiansRayHierarchicalCUDA_forward<NUM_CHANNELS, HEAD_QUEUE_SIZE, MID_QUEUE_SIZE, HIER_CULLING, DEBUG><<<grid, {16, 4, 4}>>>( \
 	ranges, point_list, W, H, means2D, cov3D_inv, projmatrix_inv, (float3 *)cam_pos, colors, conic_opacity, final_T, n_contrib, bg_color, debugVisualization.type, out_color, focal_x, focal_y, partialprojmatrix_inv)
@@ -637,8 +648,8 @@ void FORWARD::preprocess(int P, int D, int M,
 	uint32_t* visibilityMask,
 	uint32_t* visibilityMaskSum)
 {
-#define PREPROCESS_CALL(TBC, LB) \
-	preprocessCUDA<NUM_CHANNELS, TBC, LB> << <(P + 255) / 256, 256 >> > ( \
+#define PREPROCESS_CALL(TBC, LB, OP) \
+	preprocessCUDA<NUM_CHANNELS, TBC, LB, OP> << <(P + 255) / 256, 256 >> > ( \
 		P, D, M, \
 		means3D, \
 		scales, \
@@ -674,20 +685,42 @@ void FORWARD::preprocess(int P, int D, int M,
 		visibilityMaskSum \
 		);
 
-	if (splatting_settings.culling_settings.tile_based_culling)
+	if (splatting_settings.optimal_projection)
 	{
-		if (splatting_settings.load_balancing) {
-			PREPROCESS_CALL(true, true);
-		} else {
-			PREPROCESS_CALL(true, false);
+		if (splatting_settings.culling_settings.tile_based_culling)
+		{
+			if (splatting_settings.load_balancing) {
+				PREPROCESS_CALL(true, true, true);
+			} else {
+				PREPROCESS_CALL(true, false, true);
+			}
+		}
+		else
+		{
+			if (splatting_settings.load_balancing) {
+				PREPROCESS_CALL(false, true, true);
+			} else {
+				PREPROCESS_CALL(false, false, true);
+			}
 		}
 	}
 	else
 	{
-		if (splatting_settings.load_balancing) {
-			PREPROCESS_CALL(false, true);
-		} else {
-			PREPROCESS_CALL(false, false);
+		if (splatting_settings.culling_settings.tile_based_culling)
+		{
+			if (splatting_settings.load_balancing) {
+				PREPROCESS_CALL(true, true, false);
+			} else {
+				PREPROCESS_CALL(true, false, false);
+			}
+		}
+		else
+		{
+			if (splatting_settings.load_balancing) {
+				PREPROCESS_CALL(false, true, false);
+			} else {
+				PREPROCESS_CALL(false, false, false);
+			}
 		}
 	}
 
@@ -756,16 +789,18 @@ void FORWARD::duplicate(int P,
 			{
 				if (!splatting_settings.load_balancing && !splatting_settings.culling_settings.tile_based_culling)
 				{
-					duplicateWithKeysCUDA<<<(P + 255) / 256, 256>>>(
-						P,
-						rects2D,
-						means2D,
-						depths,
-						offsets,
-						gaussian_keys_unsorted,
-						gaussian_values_unsorted,
-						radii,
-						grid);
+					// viewspace-z and distance treated equally
+					CALL_DUPLICATE_SORT_ORDER(GlobalSortOrder::VIEWSPACE_Z);
+					// duplicateWithKeysCUDA<<<(P + 255) / 256, 256>>>(
+					// 	P,
+					// 	rects2D,
+					// 	means2D,
+					// 	depths,
+					// 	offsets,
+					// 	gaussian_keys_unsorted,
+					// 	gaussian_values_unsorted,
+					// 	radii,
+					// 	grid);
 				}
 				else
 				{

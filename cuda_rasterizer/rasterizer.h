@@ -132,6 +132,8 @@ namespace CudaRasterizer
         CullingSettings culling_settings;
         bool load_balancing;
         bool proper_ewa_scaling;
+		bool optimal_projection = false;
+		bool foveated_rendering = false;
     };
 
     void inline to_json(nlohmann::json& j, const SplattingSettings& s)
@@ -179,6 +181,8 @@ namespace CudaRasterizer
         }
         j.at("load_balancing").get_to(s.load_balancing);
         j.at("proper_ewa_scaling").get_to(s.proper_ewa_scaling);
+		if (j.contains("foveated_rendering")) j.at("foveated_rendering").get_to(s.foveated_rendering);
+		if (j.contains("optimal_projection")) j.at("optimal_projection").get_to(s.optimal_projection);
     }
 
 	class Rasterizer

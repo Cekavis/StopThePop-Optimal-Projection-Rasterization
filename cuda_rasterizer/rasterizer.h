@@ -283,6 +283,12 @@ namespace CudaRasterizer
 		int cx, int cy,
 		float ratio
 	);
+	
+	void blur3x3(
+		const float* src,
+		const float* alphas,
+		float* dst,
+		int w, int h);
 
 	void getAlphaMask(
 		int w_src, int h_src,

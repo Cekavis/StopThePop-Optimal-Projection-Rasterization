@@ -777,6 +777,58 @@ void CudaRasterizer::blend(
 	);
 }
 
+__global__ void blur3x3CUDA_simple(
+	const float* __restrict__ src,
+	const float* __restrict__ alphas,
+	float* __restrict__ dst,
+	int w, int h)
+{
+	int idx_ovr = blockIdx.x * blockDim.x + threadIdx.x;
+	if (idx_ovr >= w * h * NUM_CHANNELS)
+		return;
+
+	int c = idx_ovr / (w * h);
+
+	int idx = idx_ovr - c * w * h;
+	int x = idx % w;
+	int y = idx / w;
+	
+	constexpr int STRIDE = 2;
+	constexpr int KERNEL_SIZE = 3;
+	constexpr float kernel[KERNEL_SIZE][KERNEL_SIZE] = {
+		{1 / 16.f, 1 / 8.f, 1 / 16.f},
+		{1 /  8.f, 1 / 4.f, 1 /  8.f},
+		{1 / 16.f, 1 / 8.f, 1 / 16.f},
+	};
+
+	float alpha = alphas[idx];
+	float my_color = src[idx_ovr];
+
+	float out_color = 0.0f;
+	for (int i = 0; i < KERNEL_SIZE; i++)
+		for (int j = 0; j < KERNEL_SIZE; j++)
+		{
+			int yo = min(max(y + (i - (KERNEL_SIZE / 2)) * STRIDE, 0), h);
+			int xo = min(max(x + (j - (KERNEL_SIZE / 2)) * STRIDE, 0), w);
+
+			out_color += kernel[i][j] * src[c * w * h + yo * w + xo];
+		}
+
+	dst[idx_ovr] = alpha * my_color + (1.0f - alpha) * out_color;
+}
+
+void CudaRasterizer::blur3x3(
+	const float* src,
+	const float* alphas,
+	float* dst,
+	int w, int h)
+{
+	blur3x3CUDA_simple<<<{static_cast<unsigned int>(((w * h * NUM_CHANNELS) + 255) / 256)}, {256U} >>>(
+		src, alphas,
+		dst, w, h
+	);
+}
+
 __global__ void getAlphaMaskCUDA(
 	int w_src, int h_src,
 	float* dst,

@@ -52,6 +52,147 @@ uint32_t getHigherMsb(uint32_t n)
 	return msb;
 }
 
+__global__ void tileNumberCalc(uint32_t P, uint32_t* num_tiles, int W, int H, float* mask, int* is_small_tile, uint32_t* visibilityMask)
+{
+	uint32_t idx = cg::this_grid().thread_rank();
+	if (idx >= P)
+		return;
+
+	// (width + BLOCK_X - 1) / BLOCK_X
+	uint32_t horizontal_blocks = (W + BLOCK_X_32 - 1) / BLOCK_X_32;
+	uint32_t vertical_blocks = (H + BLOCK_Y_32 - 1) / BLOCK_Y_32;
+
+	auto t_x_px = (idx % horizontal_blocks) * BLOCK_X_32;
+	auto t_y_px = (idx / horizontal_blocks) * BLOCK_X_32;
+
+	auto tile_border_px = t_y_px * (W) + t_x_px; 
+	auto tile_border_px2 = (idx % horizontal_blocks) * (vertical_blocks) + (idx / horizontal_blocks); 
+
+	if (!(visibilityMask[tile_border_px2 / 32] >> (tile_border_px2 % 32) & 1))
+	{
+		is_small_tile[idx] = -1;
+		return;
+	}
+
+	if (mask[tile_border_px] > 0.f) {
+		atomicAdd(num_tiles, 4);
+		is_small_tile[idx] = 3;
+		return;
+	}
+	if (t_x_px + BLOCK_X_32 < W && mask[tile_border_px + BLOCK_X_32] > 0.f) {
+		atomicAdd(num_tiles, 4);
+		is_small_tile[idx] = 3;
+		return;
+	}
+	if (t_y_px + BLOCK_X_32 < H && mask[tile_border_px + BLOCK_X_32 * W] > 0.f) {
+		atomicAdd(num_tiles, 4);
+		is_small_tile[idx] = 3;
+		return;
+	}
+	if (t_x_px + BLOCK_X_32 < W && t_y_px + BLOCK_Y_32 < H && mask[tile_border_px + BLOCK_X_32 + BLOCK_X_32 * W] > 0.f) {
+		atomicAdd(num_tiles, 4);
+		is_small_tile[idx] = 3;
+		return;
+	}
+
+	// theoretically, 4 checks should be sufficient, but for the sake of fun lets have one more
+	if (t_x_px + BLOCK_X < W && t_y_px + BLOCK_Y < H &&mask[tile_border_px + BLOCK_X + BLOCK_Y * W] > 0.f) {
+		atomicAdd(num_tiles, 4);
+		is_small_tile[idx] = 3;
+		return;
+	}
+	is_small_tile[idx] = 0;
+	atomicAdd(num_tiles, 1);
+	return;
+}
+
+__global__ void writeTileSubtileList(uint32_t P, uint32_t* rangeMap, int* is_small_tile, int* offsets)
+{
+	uint32_t idx = cg::this_grid().thread_rank();
+	if (idx >= P)
+		return;
+		
+	if (is_small_tile[idx] > 0) {
+		// we need to write 4 entries, with offset 1-4
+		rangeMap[offsets[idx] + idx] = idx * MOD_TILE + 1;
+		rangeMap[offsets[idx] + idx +1] = idx * MOD_TILE + 2;
+		rangeMap[offsets[idx] + idx +2] = idx * MOD_TILE + 3;
+		rangeMap[offsets[idx] + idx +3] = idx * MOD_TILE + 4;
+	}
+	else if (is_small_tile[idx] < 0)
+	{
+
+	}
+	else {
+		rangeMap[offsets[idx] + idx] = idx * MOD_TILE;
+	}
+	
+	return;
+}
+
+__global__ void identifyGaussianTileCount(int NT, uint2* ranges, int* gaussians_per_tile, const uint32_t* tile_idxs)
+{
+	auto idx = cg::this_grid().thread_rank();
+	if (idx >= NT)
+		return;
+
+	// uint32_t group_index = tile_idxs[idx]; 
+	uint32_t block_idx = ((tile_idxs[idx] / MOD_TILE) * MOD_TILE) / MOD_TILE;
+
+	gaussians_per_tile[idx] = -(ranges[block_idx].y - ranges[block_idx].x);
+}
+
+int CudaRasterizer::Rasterizer::computeTileBoundaries(uint32_t* rangeMap, int width, int height, float* mask, uint32_t* tiles)
+{
+	// 32x32 tiles by default...
+	// std::cout << width << " " << height << std::endl;
+	dim3 tile_grid_32(
+		(width + BLOCK_X_32 - 1) / BLOCK_X_32, 
+		(height + BLOCK_Y_32 - 1) / BLOCK_Y_32, 
+	1);
+
+	dim3 block(BLOCK_X, BLOCK_Y, 1);
+
+	uint32_t *num_tiles;
+	int *is_small_tile, *is_small_tile_sum;
+	uint32_t num_tiles_cpu{0};
+
+	uint32_t num32x32_tiles = tile_grid_32.x * tile_grid_32.y;
+
+	// allocate memory
+	cudaMalloc((void**)&num_tiles, sizeof(uint32_t));
+	cudaMalloc((void**)&is_small_tile, sizeof(int) * num32x32_tiles);
+	cudaMalloc((void**)&is_small_tile_sum, sizeof(int) * num32x32_tiles);
+
+	// set to 0
+	cudaMemset(num_tiles, 0, sizeof(uint32_t));
+	cudaMemset(is_small_tile, 0, sizeof(int) * num32x32_tiles);
+	cudaMemset(is_small_tile_sum, 0, sizeof(int) * num32x32_tiles);
+
+	// compute total number of tiles needed
+	tileNumberCalc<<<(num32x32_tiles + 255) / 256, 256>>>(num32x32_tiles, num_tiles, width, height, mask, is_small_tile, tiles);
+	cudaMemcpy(&num_tiles_cpu, num_tiles, sizeof(uint32_t), cudaMemcpyDeviceToHost);
+	
+	// compute a PREFIX SUM to obtain the offsets for the index buffer
+	void     *d_temp_storage = nullptr;
+	size_t   temp_storage_bytes = 0;
+	cub::DeviceScan::ExclusiveSum(
+	d_temp_storage, temp_storage_bytes, is_small_tile, is_small_tile_sum, num32x32_tiles);
+	cudaMalloc(&d_temp_storage, temp_storage_bytes);
+
+	cub::DeviceScan::ExclusiveSum(
+	d_temp_storage, temp_storage_bytes, is_small_tile, is_small_tile_sum, num32x32_tiles);
+
+	// write to the subtile list leveraging the previously computed buffer
+	writeTileSubtileList<<<(num32x32_tiles + 255) / 256, 256>>>(num32x32_tiles, rangeMap, is_small_tile, is_small_tile_sum);
+
+	cudaFree(num_tiles);
+	cudaFree(is_small_tile);
+	cudaFree(is_small_tile_sum);
+
+	return num_tiles_cpu;
+}
+
 void applyDebugVisualization(
 	DebugVisualizationData& debugVisualization,
 	int width, int height,
@@ -205,7 +346,7 @@ CudaRasterizer::ImageState CudaRasterizer::ImageState::fromChunk(char*& chunk, s
 	return img;
 }
 
-CudaRasterizer::BinningState CudaRasterizer::BinningState::fromChunk(char*& chunk, size_t P)
+CudaRasterizer::BinningState CudaRasterizer::BinningState::fromChunk(char*& chunk, size_t P, size_t NT, const uint32_t* range_map)
 {
 	BinningState binning;
 	obtain(chunk, binning.point_list, P, 128);
@@ -217,6 +358,15 @@ CudaRasterizer::BinningState CudaRasterizer::BinningState::fromChunk(char*& chun
 		binning.point_list_keys_unsorted, binning.point_list_keys,
 		binning.point_list_unsorted, binning.point_list, P);
 	obtain(chunk, binning.list_sorting_space, binning.sorting_size, 128);
+
+	obtain(chunk, binning.tile_indices_out, NT, 128);
+	obtain(chunk, binning.tile_num_gaussians, NT, 128);
+	cub::DeviceRadixSort::SortPairs(
+		nullptr, binning.tile_sorting_size, 
+		binning.tile_num_gaussians, binning.tile_num_gaussians, 
+		range_map, binning.tile_indices_out, NT);
+	obtain(chunk, binning.tile_sorting_space, binning.tile_sorting_size, 128);
+
 	return binning;
 }
 
@@ -226,7 +376,7 @@ int CudaRasterizer::Rasterizer::forward(
 	std::function<char* (size_t)> geometryBuffer,
 	std::function<char* (size_t)> binningBuffer,
 	std::function<char* (size_t)> imageBuffer,
-	const int P, int D, int M,
+	const int P, int D, int M, int NT,
 	const float* background,
 	const int width, int height,
 	const SplattingSettings splatting_settings,
@@ -243,6 +393,8 @@ int CudaRasterizer::Rasterizer::forward(
 	const float* projmatrix,
 	const float* inv_viewprojmatrix,
 	const float* cam_pos,
+	const uint32_t* range_map,
+	const float* foveated_mask,
 	const float tan_fovx, float tan_fovy,
 	const bool prefiltered,
 	float* out_color,
@@ -252,8 +404,8 @@ int CudaRasterizer::Rasterizer::forward(
 	uint32_t* visibilityMaskSum)
 {
 	// nvtx3::scoped_range range("Forward");
-	static Timer timer({ "Preprocess", "Duplicate", "Sort", "Render" });
-	timer.setActive(debugVisualization.timing_enabled);
+	static Timer timer({ "Preprocess", "Duplicate", "Sort", "RenderResort","Render" }, 500);
+	timer.setActive(true);
 
 	const float focal_y = height / (2.0f * tan_fovy);
 	const float focal_x = width / (2.0f * tan_fovx);
@@ -268,7 +420,15 @@ int CudaRasterizer::Rasterizer::forward(
 		radii = geomState.internal_radii;
 	}
 
-	dim3 tile_grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);
+	dim3 tile_grid(
+		(width + BLOCK_X - 1) / BLOCK_X, 
+		(height + BLOCK_Y - 1) / BLOCK_Y, 1
+	);
+	if (splatting_settings.foveated_rendering) {
+		tile_grid.x = (width + BLOCK_X_32 - 1) / BLOCK_X_32;
+		tile_grid.y = (height + BLOCK_Y_32 - 1) / BLOCK_Y_32;
+	}
+	
 	dim3 block(BLOCK_X, BLOCK_Y, 1);
 
 	// Dynamically resize image-based auxiliary buffers during training
@@ -328,9 +488,11 @@ int CudaRasterizer::Rasterizer::forward(
 	int num_rendered;
 	CHECK_CUDA(cudaMemcpy(&num_rendered, geomState.point_offsets + P - 1, sizeof(int), cudaMemcpyDeviceToHost), debug);
 
-	size_t binning_chunk_size = required<BinningState>(num_rendered);
+	//std::cout << "render " << num_rendered << std::endl;
+
+	size_t binning_chunk_size = required<BinningState>(num_rendered, NT, range_map);
 	char* binning_chunkptr = binningBuffer(binning_chunk_size);
-	BinningState binningState = BinningState::fromChunk(binning_chunkptr, num_rendered);
+	BinningState binningState = BinningState::fromChunk(binning_chunkptr, num_rendered, NT, range_map);
 
 	{
 	// nvtx3::scoped_range duplicateRange("Duplicate");
@@ -372,6 +534,8 @@ int CudaRasterizer::Rasterizer::forward(
 
 	CHECK_CUDA(cudaMemset(imgState.ranges, 0, tile_grid.x * tile_grid.y * sizeof(uint2)), debug);
 
+	timer();
+
 	// Identify start and end of per-tile workloads in sorted list
 	if (num_rendered > 0)
 		identifyTileRanges << <(num_rendered + 255) / 256, 256 >> > (
@@ -380,15 +544,35 @@ int CudaRasterizer::Rasterizer::forward(
 			imgState.ranges);
 	CHECK_CUDA(, debug)
 
+	if (splatting_settings.launch_large_tiles_first) {
+		// Identify start and end of per-tile workloads in sorted list
+		identifyGaussianTileCount << <(NT + 255) / 256, 256 >> > (
+			NT,
+			imgState.ranges,
+			binningState.tile_num_gaussians,
+			range_map
+		);
+
+		// Run sorting operation
+		cub::DeviceRadixSort::SortPairs(binningState.tile_sorting_space, binningState.tile_sorting_size, 
+		binningState.tile_num_gaussians, binningState.tile_num_gaussians, 
+		range_map, binningState.tile_indices_out, NT, 0, getHigherMsb(P));
+	}
+
 	timer();
 
 	// Let each tile blend its range of Gaussians independently in parallel
+	if (splatting_settings.foveated_rendering) {
+		tile_grid.x = NT;
+		tile_grid.y = 1;
+	}
 	const float* feature_ptr = colors_precomp != nullptr ? colors_precomp : geomState.rgb;
 	{
 	// nvtx3::scoped_range renderRange("Render");
 	CHECK_CUDA(FORWARD::render(
 		tile_grid, block,
 		imgState.ranges,
+		splatting_settings.launch_large_tiles_first ? binningState.tile_indices_out : range_map,
 		splatting_settings,
 		binningState.point_list,
 		width, height,
@@ -404,6 +588,7 @@ int CudaRasterizer::Rasterizer::forward(
 		background,
 		debugVisualization,
 		out_color, 
+		foveated_mask,
 		focal_x, focal_y,
 		viewmatrix), debug)
 	}
@@ -420,7 +605,7 @@ int CudaRasterizer::Rasterizer::forward(
 		for (auto const& x : timings)
 			ss << " - " << x.first << ": " << x.second << "ms\n";
 		debugVisualization.timings_text = ss.str();
-		// std::cout << debugVisualization.timings_text << std::endl;
+		std::cout << debugVisualization.timings_text << std::endl;
 	}
 
 	applyDebugVisualization(
@@ -477,7 +662,7 @@ void CudaRasterizer::Rasterizer::backward(
 {
 	bool requires_cov3D_inv = sort_settings.requiresDepthAlongRay();
 	GeometryState geomState = GeometryState::fromChunk(geom_buffer, P, requires_cov3D_inv);
-	BinningState binningState = BinningState::fromChunk(binning_buffer, R);
+	BinningState binningState = BinningState::fromChunk(binning_buffer, R, 0, nullptr);
 	ImageState imgState = ImageState::fromChunk(img_buffer, width * height);
 
 	if (radii == nullptr)
@@ -560,7 +745,6 @@ __global__ void blendCUDA(
 	float ratio
 )
 {
-	int c = blockIdx.y;
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
 	if (idx >= w_src * h_src)
 		return;
@@ -573,8 +757,7 @@ __global__ void blendCUDA(
 	float alpha = fminf(fminf(fminf(dx, dy), 1 - dx), 1 - dy);
 	alpha = fminf(1.0f, alpha / ratio);
 
-	dst[c * w * h + (cy + y) * w + cx + x] = alpha * 	   src[c * w_src * h_src + y * w_src + x]
-										   + (1 - alpha) * dst[c * w * h + (cy + y) * w + cx + x];
+	dst[(cy + y) * w + cx + x] = src[(cy + y) * w + cx + x];
 }
 
 void CudaRasterizer::blend(
@@ -586,8 +769,47 @@ void CudaRasterizer::blend(
 	float ratio
 )
 {
-	blendCUDA<<< {(unsigned int)(w_src * h_src / 256), 3}, 256 >>>(
+	blendCUDA<<< {(unsigned int)(w_src * h_src / 256), 1}, 256 >>>(
 		src, w_src, h_src,
+		dst, w, h,
+		cx, cy,
+		ratio
+	);
+}
+
+__global__ void getAlphaMaskCUDA(
+	int w_src, int h_src,
+	float* dst,
+	int w, int h,
+	int cx, int cy,
+	float ratio
+)
+{
+	int idx = blockIdx.x * blockDim.x + threadIdx.x;
+	if (idx >= w_src * h_src)
+		return;
+
+	int x = idx % w_src;
+	int y = idx / w_src;
+
+	float dx = (x + 0.5f) / w_src;
+	float dy = (y + 0.5f) / h_src;
+	float alpha = fminf(fminf(fminf(dx, dy), 1 - dx), 1 - dy);
+	alpha = fminf(1.0f, alpha / ratio);
+
+	dst[(cy + y) * w + cx + x] = alpha;
+}
+
+void CudaRasterizer::getAlphaMask(
+	int w_src, int h_src,
+	float* dst,
+	int w, int h,
+	int cx, int cy,
+	float ratio
+)
+{
+	getAlphaMaskCUDA<<< {(unsigned int)(w_src * h_src / 256), 1}, 256 >>>(
+		w_src, h_src,
 		dst, w, h,
 		cx, cy,
 		ratio

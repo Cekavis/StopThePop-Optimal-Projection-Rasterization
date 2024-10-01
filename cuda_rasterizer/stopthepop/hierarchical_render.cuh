@@ -204,9 +204,10 @@ __device__ void batcherSort(CG& cg, KT* keys, VT* vals)
 #define DEBUG_HIERARCHICAL 0x0
 
 // MID_WINDOW needs to be pow2+4, minimum 8
-template <int HEAD_WINDOW, int MID_WINDOW, bool CULL_ALPHA, typename PF, typename SF, typename BF, typename FF>
+template <int HEAD_WINDOW, int MID_WINDOW, bool CULL_ALPHA, bool FOVEATED, typename PF, typename SF, typename BF, typename FF>
 __device__ void sortGaussiansRayHierarchicaEvaluation(
 	const uint2* __restrict__ ranges,
+	const uint32_t* __restrict__ range_lookup,
 	const uint32_t* __restrict__ point_list,
 	int W, int H,
 	const float2* __restrict__ points_xy_image,
@@ -314,9 +315,35 @@ __device__ void sortGaussiansRayHierarchicaEvaluation(
 	constexpr uint32_t FillTailMask = 0xFFFF;
 	constexpr uint32_t FillTailOne = 0x1;
 
-	// initialize ray directions
-	const uint2 tile_min = { block.group_index().x * BLOCK_X, block.group_index().y * BLOCK_Y };
-	const uint2 tail_corner = { tile_min.x + 4 * block.thread_index().y, tile_min.y + 4 * block.thread_index().z };
+	const int32_t horizontal_blocks = FOVEATED ? (W + BLOCK_X_32 - 1) / BLOCK_X_32 : (W + BLOCK_X - 1) / BLOCK_X;
+	const uint32_t block_idx = block.group_index().y * horizontal_blocks + block.group_index().x;
+	const uint32_t group_index = FOVEATED ? range_lookup[block_idx] : 0;
+
+	// if we're doing foveated rendering, perform a range_lookup
+	const uint32_t current_range = FOVEATED ? ((group_index / MOD_TILE) * MOD_TILE) / MOD_TILE : block_idx;
+
+	// current range is now a multiple of 5, so we have to transform it...
+
+	//const uint32_t subtile = 
+	const uint32_t bx = current_range % horizontal_blocks;
+	const uint32_t by = current_range / horizontal_blocks;
+
+	const uint32_t subtile_id = FOVEATED ? (group_index % MOD_TILE) - 1 : 0;
+	const uint32_t subtile = FOVEATED ? group_index % MOD_TILE != 0 : 0;
+
+	// setup helpers
+	const uint32_t tail_corner_offset = FOVEATED ? subtile ? 4 : 8 : 4;
+	const uint32_t tile_min_multiply = FOVEATED ? BLOCK_X_32 : BLOCK_X;
+
+	const uint2 tile_min = { 
+		bx * tile_min_multiply + (subtile_id & subtile) * BLOCK_X, 
+		by * tile_min_multiply + (subtile_id>>1 & subtile) * BLOCK_Y 
+	};
+
+	const uint2 tail_corner = { 
+		tile_min.x + tail_corner_offset * block.thread_index().y, 
+		tile_min.y + tail_corner_offset * block.thread_index().z 
+	};
 
 	const glm::mat4 inverse_vp = loadMatrix4x4(projmatrix_inv);
 	const glm::mat4 inverse_p  = loadMatrix4x4(partialprojmatrix_inv);
@@ -324,17 +351,20 @@ __device__ void sortGaussiansRayHierarchicaEvaluation(
 
 	if (block.thread_index().x < 5)
 	{
+		const float tail_viewdir_offset = FOVEATED ? subtile ? 1.5f : 3.5f : 1.5f;
+		const uint32_t mid_viewdir_offset = FOVEATED ? subtile ? 2 : 4 : 2;
+
 		// first thread computes the tail view dir, next 4 the mid view dir
 		float2 pos = { static_cast<float>(tail_corner.x), static_cast<float>(tail_corner.y) };
 		if (block.thread_index().x == 0)
 		{
-			pos.x += 1.5f;
-			pos.y += 1.5f;
+			pos.y += tail_viewdir_offset;
+			pos.x += tail_viewdir_offset;
 		}
 		else
 		{
-			pos.x += 0.5f + 2 * ((block.thread_index().x - 1) % 2);
-			pos.y += 0.5f + 2 * ((block.thread_index().x - 1) / 2);
+			pos.x += 0.5f + mid_viewdir_offset * ((block.thread_index().x - 1) % 2);
+			pos.y += 0.5f + mid_viewdir_offset * ((block.thread_index().x - 1) / 2);
 		}
 		float3 dir = computeViewRay(inverse_vp, campos, pos, W, H);
 		tail_and_mid_viewdir[block.thread_index().y][block.thread_index().z][block.thread_index().x] = dir;
@@ -352,7 +382,13 @@ __device__ void sortGaussiansRayHierarchicaEvaluation(
 	const int heady = midrank / 2;
 	const int headx = midrank % 2;
 
-	const uint2 pixpos = { tail_corner.x + midx * 2 + headx, tail_corner.y + midy * 2 + heady };
+	const uint32_t mid_multiply = FOVEATED ? subtile ? 2 : 4 : 2;
+	const uint32_t head_multiply = FOVEATED ? subtile ? 1 : 2 : 1;
+
+	const uint2 pixpos = {
+		tail_corner.x + midx * mid_multiply + headx * head_multiply, 
+		tail_corner.y + midy * mid_multiply + heady * head_multiply
+	};
 	bool active = pixpos.x < W && pixpos.y < H;
 
 	const float3 viewdir = computeViewRay(inverse_vp, campos, float2{ static_cast<float>(pixpos.x), static_cast<float>(pixpos.y) }, W, H);
@@ -360,12 +396,9 @@ __device__ void sortGaussiansRayHierarchicaEvaluation(
 	printf("own dir %d - %d %d %d  - pix %d %d dir %f %f %f\n", warp.thread_rank(), block.thread_index().y, block.thread_index().z, block.thread_index().x,
 		pixpos.x, pixpos.y, viewdir.x, viewdir.y, viewdir.z);
 #endif
-	// setup helpers
-	const int32_t horizontal_blocks = (W + BLOCK_X - 1) / BLOCK_X;
-
 	if (warp.thread_rank() == 0)
 	{
-		range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
+		range = ranges[current_range];
 	}
 	
 
@@ -791,16 +824,41 @@ __device__ void sortGaussiansRayHierarchicaEvaluation(
 				// cull against tail tile
 				if (CULL_ALPHA)
 				{
-					// tile boundaries
-					const glm::vec2 tail_rect_min = { static_cast<float>(block.group_index().x * BLOCK_X + 4 * xid), static_cast<float>(block.group_index().y * BLOCK_Y + 4 * block.thread_index().z) };
-					const glm::vec2 tail_rect_max = { tail_rect_min.x + 3.0f, tail_rect_min.y + 3.0f };
+					if (!FOVEATED || subtile) {
+						// tile boundaries
+						const glm::vec2 tail_rect_min = { 
+							static_cast<float>(bx * tile_min_multiply + (subtile_id & subtile) * BLOCK_X + 4 * xid), 
+							static_cast<float>(by * tile_min_multiply + (subtile_id>>1 & subtile) * BLOCK_Y + 4 * block.thread_index().z) 
+						};
+						const glm::vec2 tail_rect_max = { 
+							tail_rect_min.x + 3.0f, 
+							tail_rect_min.y + 3.0f 
+						};
 
-					glm::vec2 max_pos;
-					float power = max_contrib_power_rect_gaussian_float_opimal_projection<3, 3>(in_conic_opacity, in_point_xy, tail_rect_min, tail_rect_max, W, H, fx, fy, inverse_p, max_pos);
+						glm::vec2 max_pos;
+						float power = max_contrib_power_rect_gaussian_float_opimal_projection<3, 3>(in_conic_opacity, in_point_xy, tail_rect_min, tail_rect_max, W, H, fx, fy, inverse_p, max_pos);
 
-					float alpha = min(0.99f, in_conic_opacity.w * exp(-power));
-					if (alpha < 1.0f / 255.0f)
-						halfs_culled_mask |= (0x1U << half);
+						float alpha = min(0.99f, in_conic_opacity.w * exp(-power));
+						if (alpha < 1.0f / 255.0f)
+							halfs_culled_mask |= (0x1U << half);
+					}
+					else {
+						const glm::vec2 tail_rect_min = { 
+							static_cast<float>(bx * tile_min_multiply + (subtile_id & subtile) * BLOCK_X + 8 * xid), 
+							static_cast<float>(by * tile_min_multiply + (subtile_id>>1 & subtile) * BLOCK_Y + 8 * block.thread_index().z) 
+						};
+						const glm::vec2 tail_rect_max = { 
+							tail_rect_min.x + 7.0f, 
+							tail_rect_min.y + 7.0f 
+						};
+
+						glm::vec2 max_pos;
+						float power = max_contrib_power_rect_gaussian_float_opimal_projection<7, 7>(in_conic_opacity, in_point_xy, tail_rect_min, tail_rect_max, W, H, fx, fy, inverse_p, max_pos);
+
+						float alpha = min(0.99f, in_conic_opacity.w * exp(-power));
+						if (alpha < 1.0f / 255.0f)
+							halfs_culled_mask |= (0x1U << half);
+					}
 				}
 			}
 		}
@@ -993,15 +1051,16 @@ __device__ void sortGaussiansRayHierarchicaEvaluation(
 
 	if (pixpos.x < W && pixpos.y < H)
 	{
-		fin_function(pixpos, blend_data, debugType, range.y - range.x);
+		fin_function(pixpos, blend_data, debugType, range.y - range.x, subtile);
 	}
 }
 
 
 
-template <int32_t CHANNELS, int HEAD_WINDOW, int MID_WINDOW, bool CULL_ALPHA = true, bool ENABLE_DEBUG_VIZ = false>
+template <int32_t CHANNELS, int HEAD_WINDOW, int MID_WINDOW, bool CULL_ALPHA = true, bool FOVEATED = false, bool ENABLE_DEBUG_VIZ = false>
 __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_forward(
 	const uint2* __restrict__ ranges,
+	const uint32_t* __restrict__ range_lookup,
 	const uint32_t* __restrict__ point_list,
 	int W, int H,
 	const float2* __restrict__ points_xy_image,
@@ -1015,6 +1074,7 @@ __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_forw
 	const float* __restrict__ bg_color,
 	DebugVisualization debugType,
 	float* __restrict__ out_color,
+	const float* __restrict__ foveated_mask,
 	float focal_x, float focal_y,
 	const float* __restrict__ partialprojmatrix_inv)
 {
@@ -1076,17 +1136,45 @@ __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_forw
 
 			return true;
 		};
-	auto fin_function = [&](const uint2& pixpos, BlendData& blend_data, DebugVisualization debugType, int range)
+	auto fin_function = [&](const uint2& pixpos, BlendData& blend_data, DebugVisualization debugType, int range, bool subtile=false)
 		{
 			uint32_t pix_id = W * pixpos.y + pixpos.x;
 			final_T[pix_id] = blend_data.T;
+			float alpha = foveated_mask[pix_id];
 
 			// n_contrib[pix_id] = num_blends;
 
 			if constexpr (!ENABLE_DEBUG_VIZ)
 			{
-				for (int ch = 0; ch < CHANNELS; ch++)
+				// TODO: we need the values of the mask
+				for (int ch = 0; ch < CHANNELS; ch++) {
 					out_color[ch * H * W + pix_id] = blend_data.C[ch] + blend_data.T * bg_color[ch];
+					__syncwarp();
+					if constexpr (FOVEATED) {
+						if (!subtile) {
+							// TODO: bilinear
+							if (pixpos.x + 1 < W)
+								out_color[ch * H * W + pix_id + 1] = (blend_data.C[ch] + blend_data.T * bg_color[ch]);
+							if (pixpos.y + 1 < H)
+								out_color[ch * H * W + pix_id + W] = (blend_data.C[ch] + blend_data.T * bg_color[ch]);
+							if (pixpos.y + 1 < H && pixpos.x + 1 < W)
+								out_color[ch * H * W + pix_id + W + 1] = (blend_data.C[ch] + blend_data.T * bg_color[ch]);
+						}
+						else
+						{
+							// approximate the 2x2 tile sum as the mean of 4 pixels
+							// we dont have to worry about bounds checks here because the mask is always in the middle anyway (:
+							float interm_color_ch = (out_color[ch * H * W + (W * ((pixpos.y / 2) * 2 + 0) + (pixpos.x / 2) * 2 + 0)] +
+													 out_color[ch * H * W + (W * ((pixpos.y / 2) * 2 + 0) + (pixpos.x / 2) * 2 + 1)] +
+													 out_color[ch * H * W + (W * ((pixpos.y / 2) * 2 + 1) + (pixpos.x / 2) * 2 + 0)] +
+													 out_color[ch * H * W + (W * ((pixpos.y / 2) * 2 + 1) + (pixpos.x / 2) * 2 + 1)]) 
+													 	* 0.25f * (1 - alpha) + alpha * out_color[ch * H * W + pix_id];
+							__syncwarp();
+							out_color[ch * H * W + pix_id] = interm_color_ch;						
+						}
+					}
+				}
+					
 			}
 			else
 			{
@@ -1094,8 +1182,8 @@ __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_forw
 			}
 		};
 
-	sortGaussiansRayHierarchicaEvaluation<HEAD_WINDOW, MID_WINDOW, CULL_ALPHA>(
-		ranges, point_list, W, H, points_xy_image, cov3Ds_inv, projmatrix_inv, cam_pos, conic_opacity, debugType,
+	sortGaussiansRayHierarchicaEvaluation<HEAD_WINDOW, MID_WINDOW, CULL_ALPHA, FOVEATED>(
+		ranges, range_lookup, point_list, W, H, points_xy_image, cov3Ds_inv, projmatrix_inv, cam_pos, conic_opacity, debugType,
 		prep_function, store_function, blend_function, fin_function, focal_x, focal_y, partialprojmatrix_inv);
 }
 
@@ -1336,12 +1424,12 @@ __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_back
 
 			return true;
 		};
-	auto fin_function = [&](const uint2& pixpos, BlendData& blend_data, DebugVisualization debugType, int range)
+	auto fin_function = [&](const uint2& pixpos, BlendData& blend_data, DebugVisualization debugType, int range, bool subtile=false)
 		{
 			return;
 		};
 
-	sortGaussiansRayHierarchicaEvaluation<HEAD_WINDOW, MID_WINDOW, CULL_ALPHA>(
-		ranges, point_list, W, H, points_xy_image, cov3Ds_inv, projmatrix_inv, cam_pos, conic_opacity, DebugVisualization::Disabled,
+	sortGaussiansRayHierarchicaEvaluation<HEAD_WINDOW, MID_WINDOW, CULL_ALPHA, false>(
+		ranges, nullptr, point_list, W, H, points_xy_image, cov3Ds_inv, projmatrix_inv, cam_pos, conic_opacity, DebugVisualization::Disabled,
 		prep_function, store_function, blend_function, fin_function, focal_x, focal_y, partialprojmatrix_inv);
 }

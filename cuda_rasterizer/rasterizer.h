@@ -134,6 +134,7 @@ namespace CudaRasterizer
         bool proper_ewa_scaling;
 		bool optimal_projection = false;
 		bool foveated_rendering = false;
+		bool launch_large_tiles_first = false;
     };
 
     void inline to_json(nlohmann::json& j, const SplattingSettings& s)
@@ -183,6 +184,7 @@ namespace CudaRasterizer
         j.at("proper_ewa_scaling").get_to(s.proper_ewa_scaling);
 		if (j.contains("foveated_rendering")) j.at("foveated_rendering").get_to(s.foveated_rendering);
 		if (j.contains("optimal_projection")) j.at("optimal_projection").get_to(s.optimal_projection);
+		if (j.contains("launch_large_tiles_first")) j.at("launch_large_tiles_first").get_to(s.launch_large_tiles_first);
     }
 
 	class Rasterizer
@@ -196,11 +198,19 @@ namespace CudaRasterizer
 			float* projmatrix,
 			bool* present);
 
+		static int computeTileBoundaries(
+			uint32_t* rangeMap,
+			int width,
+			int height,
+			float* mask,
+			uint32_t* tiles
+		);
+
 		static int forward(
 			std::function<char* (size_t)> geometryBuffer,
 			std::function<char* (size_t)> binningBuffer,
 			std::function<char* (size_t)> imageBuffer,
-			const int P, int D, int M,
+			const int P, int D, int M, int NT,
 			const float* background,
 			const int width, int height,
 			const SplattingSettings splatting_settings,
@@ -217,6 +227,8 @@ namespace CudaRasterizer
 			const float* projmatrix,
 			const float* inv_viewprojmatrix,
 			const float* cam_pos,
+			const uint32_t* range_map,
+			const float* foveated_mask,
 			const float tan_fovx, float tan_fovy,
 			const bool prefiltered,
 			float* out_color,
@@ -265,6 +277,14 @@ namespace CudaRasterizer
 
 	void blend(
 		const float* src,
+		int w_src, int h_src,
+		float* dst,
+		int w, int h,
+		int cx, int cy,
+		float ratio
+	);
+
+	void getAlphaMask(
 		int w_src, int h_src,
 		float* dst,
 		int w, int h,

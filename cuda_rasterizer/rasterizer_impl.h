@@ -63,7 +63,12 @@ namespace CudaRasterizer
 		uint32_t* point_list;
 		char* list_sorting_space;
 
-		static BinningState fromChunk(char*& chunk, size_t P);
+		uint32_t* tile_indices_out;
+		int* tile_num_gaussians;
+		char* tile_sorting_space;
+		size_t tile_sorting_size;
+
+		static BinningState fromChunk(char*& chunk, size_t P, size_t NT, const uint32_t* range_map);
 	};
 
 	template<typename T, typename... Args> 

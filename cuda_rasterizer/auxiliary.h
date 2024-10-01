@@ -109,6 +109,18 @@ __forceinline__ __device__ void getRect(const float2 p, const float2 rect_extent
 	};
 }
 
+__forceinline__ __device__ void getRect32x32(const float2 p, const float2 rect_extent, uint2& rect_min, uint2& rect_max, dim3 grid)
+{
+	rect_min = {
+		min(grid.x, max((int)0, (int) floorf((p.x - rect_extent.x) / BLOCK_X_32))),
+		min(grid.y, max((int)0, (int) floorf((p.y - rect_extent.y) / BLOCK_Y_32)))
+	};
+	rect_max = {
+		min(grid.x, max((int)0, (int) ceilf((p.x + rect_extent.x) / BLOCK_X_32))),
+		min(grid.y, max((int)0, (int) ceilf((p.y + rect_extent.y) / BLOCK_Y_32)))
+	};
+}
+
 __forceinline__ __device__ glm::mat4x4 loadMatrix4x4(const float* matrix)
 {
 	glm::mat4x4 mat;

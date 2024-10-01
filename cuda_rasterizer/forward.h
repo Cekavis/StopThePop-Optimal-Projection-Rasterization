@@ -77,6 +77,7 @@ namespace FORWARD
 	void render(
 		const dim3 grid, dim3 block,
 		const uint2* ranges,
+		const uint32_t* range_lookup,
 		const SplattingSettings splatting_settings,
 		const uint32_t* point_list,
 		int W, int H,
@@ -92,6 +93,7 @@ namespace FORWARD
 		const float* bg_color,
 		DebugVisualizationData& debugVisualization,
 		float* out_color,
+		const float* foveated_mask,
 		float focal_x, float focal_y,
 		const float* viewmatrix);
 

@@ -15,6 +15,9 @@
 #define NUM_CHANNELS 3 // Default 3, RGB
 #define BLOCK_X 16
 #define BLOCK_Y 16
+#define BLOCK_X_32 32
+#define BLOCK_Y_32 32
+#define MOD_TILE 5
 
 #define INVALID_TILE_ID (-1U)
 

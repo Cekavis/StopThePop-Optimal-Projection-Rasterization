@@ -439,7 +439,7 @@ __device__ inline glm::vec2 getPerTileDepthTargetPos(const glm::vec2 tile_center
 	return target_pos;
 }
 
-template<bool TILE_BASED_CULLING, bool LOAD_BALANCING = true, CudaRasterizer::GlobalSortOrder SORT_ORDER = CudaRasterizer::GlobalSortOrder::VIEWSPACE_Z>
+template<bool TILE_BASED_CULLING, bool LOAD_BALANCING = true, CudaRasterizer::GlobalSortOrder SORT_ORDER = CudaRasterizer::GlobalSortOrder::VIEWSPACE_Z, bool FOVEATED>
 __global__ void duplicateWithKeys_extended(
 	int P,
 	const float2* __restrict__ points_xy,
@@ -466,7 +466,6 @@ __global__ void duplicateWithKeys_extended(
 
 #define RETURN_OR_INACTIVE() if constexpr(LOAD_BALANCING) { active = false; } else { return; }
 //#define DUPLICATE_OPT_DEBUG
-
 	uint32_t idx = cg::this_grid().thread_rank();
 	bool active = true;
 	if (idx >= P) {
@@ -498,8 +497,10 @@ __global__ void duplicateWithKeys_extended(
 	s_rect_dims[block.thread_rank()] = rect_dims_init;
 
 	uint2 rect_min_init, rect_max_init;
-	getRect(xy_init, rect_dims_init, rect_min_init, rect_max_init, grid);
-
+	if constexpr (FOVEATED)
+		getRect32x32(xy_init, rect_dims_init, rect_min_init, rect_max_init, grid);
+	else
+		getRect(xy_init, rect_dims_init, rect_min_init, rect_max_init, grid);
 
 	constexpr size_t SHMEM_SIZE_COV3D_INV = size_t(PER_TILE_DEPTH) * BLOCK_SIZE + size_t(!PER_TILE_DEPTH);
 	__shared__ float4 s_cov3D_inv_first[SHMEM_SIZE_COV3D_INV];
@@ -552,14 +553,17 @@ __global__ void duplicateWithKeys_extended(
 					return false;
 			}
 
-			const glm::vec2 tile_min(x * BLOCK_X, y * BLOCK_Y);
-			const glm::vec2 tile_max((x + 1) * BLOCK_X - 1, (y + 1) * BLOCK_Y - 1);
+			const glm::vec2 tile_min(
+				x * FOVEATED ? BLOCK_X_32 : BLOCK_X, 
+				y * FOVEATED ? BLOCK_Y_32 : BLOCK_Y
+			);
+			const glm::vec2 tile_max((x + 1) * FOVEATED ? BLOCK_X_32 : BLOCK_X - 1, (y + 1) * FOVEATED ? BLOCK_Y_32 : BLOCK_Y - 1);
 
 			glm::vec2 max_pos;
 			float max_opac_factor = 0.0f;
 			if constexpr (EVAL_MAX_CONTRIB_POS)
 			{
-				max_opac_factor = max_contrib_power_rect_gaussian_float<BLOCK_X-1, BLOCK_Y-1>(co, xy, tile_min, tile_max, max_pos);
+				max_opac_factor = max_contrib_power_rect_gaussian_float<(FOVEATED ? BLOCK_X_32 : BLOCK_X) -1, (FOVEATED ? BLOCK_X_32 : BLOCK_X) - 1>(co, xy, tile_min, tile_max, max_pos);
 			}
 
 			if constexpr (PER_TILE_DEPTH) 
@@ -680,7 +684,7 @@ __global__ void duplicateWithKeys_extended(
 		}
 
 		uint2 rect_min, rect_max;
-		getRect(xy, rect_dims, rect_min, rect_max, grid);
+		FOVEATED ? getRect32x32(xy, rect_dims, rect_min, rect_max, grid) : getRect(xy, rect_dims, rect_min, rect_max, grid);
 
 		const uint32_t rect_width = (rect_max.x - rect_min.x);
 		const uint32_t tile_count = (rect_max.y - rect_min.y) * rect_width;

@@ -97,6 +97,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	const dim3 grid,
 	uint32_t* tiles_touched,
 	bool prefiltered,
+	bool foveated,
 	uint32_t* visibilityMask,
 	uint32_t* visibilityMaskSum)
 {
@@ -183,7 +184,12 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	const float2 rect_dims = make_float2(extent_x, extent_y);
 
 	uint2 rect_min, rect_max;
-	getRect(mean2D, rect_dims, rect_min, rect_max, grid);	
+	if (!foveated) {
+		getRect(mean2D, rect_dims, rect_min, rect_max, grid);	
+	}
+	else {
+		getRect32x32(mean2D, rect_dims, rect_min, rect_max, grid);	
+	}
 	const int tile_count_rect = (rect_max.x - rect_min.x) * (rect_max.y - rect_min.y);
 	if (tile_count_rect == 0)
 		RETURN_OR_INACTIVE();
@@ -201,7 +207,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 		if (visibilityMaskSum == nullptr)
 			tile_count = tile_count_rect;
 		else
-			tile_count = visibilityMaskSum[rect_max.x * (grid.y + 1) + rect_max.y]
+			tile_count = visibilityMaskSum[rect_max.x * (grid.y+1) + rect_max.y]
 					   - visibilityMaskSum[rect_max.x * (grid.y + 1) + rect_min.y]
 					   - visibilityMaskSum[rect_min.x * (grid.y + 1) + rect_max.y]
 					   + visibilityMaskSum[rect_min.x * (grid.y + 1) + rect_min.y];
@@ -211,7 +217,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 		// {
 		// 	for (int y = rect_min.y; y < rect_max.y; y++)
 		// 	{
-		// 		const uint32_t idx = x * grid.y + y;
+		// 		const uint32_t idx = y * grid.x + x;
 		// 		if (visibilityMask[idx / 32] >> (idx % 32) & 1)
 		// 			tile_count++;
 		// 	}
@@ -464,6 +470,7 @@ renderCUDA(
 void FORWARD::render(
 	const dim3 grid, dim3 block,
 	const uint2* ranges,
+	const uint32_t* range_lookup,
 	const SplattingSettings splatting_settings,
 	const uint32_t* point_list,
 	int W, int H,
@@ -479,6 +486,7 @@ void FORWARD::render(
 	const float* bg_color,
 	DebugVisualizationData& debugVisualization,
 	float* out_color,
+	const float* foveated_mask,
 	float focal_x, float focal_y,
 	const float* viewmatrix)
 {
@@ -563,10 +571,11 @@ void FORWARD::render(
 	else if (splatting_settings.sort_settings.sort_mode == SortMode::HIERARCHICAL)
 	{
 		
-#define CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, DEBUG) sortGaussiansRayHierarchicalCUDA_forward<NUM_CHANNELS, HEAD_QUEUE_SIZE, MID_QUEUE_SIZE, HIER_CULLING, DEBUG><<<grid, {16, 4, 4}>>>( \
-	ranges, point_list, W, H, means2D, cov3D_inv, projmatrix_inv, (float3 *)cam_pos, colors, conic_opacity, final_T, n_contrib, bg_color, debugVisualization.type, out_color, focal_x, focal_y, partialprojmatrix_inv)
+#define CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, FOVEATED, DEBUG) sortGaussiansRayHierarchicalCUDA_forward<NUM_CHANNELS, HEAD_QUEUE_SIZE, MID_QUEUE_SIZE, HIER_CULLING, FOVEATED, DEBUG><<<grid, {16, 4, 4}>>>( \
+	ranges, range_lookup, point_list, W, H, means2D, cov3D_inv, projmatrix_inv, (float3 *)cam_pos, colors, conic_opacity, final_T, n_contrib, bg_color, debugVisualization.type, out_color, foveated_mask,focal_x, focal_y, partialprojmatrix_inv)
 
-#define CALL_HIER(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE) if (debugVisualization.type == DebugVisualization::Disabled) { CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, false); } else { CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, true); }
+#define CALL_HIER2(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, FOVEATED) if (debugVisualization.type == DebugVisualization::Disabled) { CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, FOVEATED, false); } else { CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, FOVEATED, true); }
+#define CALL_HIER(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE) if (splatting_settings.foveated_rendering) { CALL_HIER2(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, true); } else { CALL_HIER2(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, false); }
 
 #ifdef STOPTHEPOP_FASTBUILD
 #define CALL_HIER_HEAD(HIER_CULLING, MID_QUEUE_SIZE) \
@@ -681,6 +690,7 @@ void FORWARD::preprocess(int P, int D, int M,
 		grid, \
 		tiles_touched, \
 		prefiltered, \
+		splatting_settings.foveated_rendering, \
 		visibilityMask, \
 		visibilityMaskSum \
 		);
@@ -747,8 +757,8 @@ void FORWARD::duplicate(int P,
 {
 	// For each instance to be rendered, produce adequate [ tile | depth ] key 
 	// and corresponding dublicated Gaussian indices to be sorted
-	#define CALL_DUPLICATE_EXTENDED(TBC, LB, SORT_ORDER) \
-		duplicateWithKeys_extended<TBC, LB, SORT_ORDER> << <(P + 255) / 256, 256 >> > ( \
+	#define CALL_DUPLICATE_EXTENDED_2(TBC, LB, SORT_ORDER, FOV) \
+		duplicateWithKeys_extended<TBC, LB, SORT_ORDER, FOV> << <(P + 255) / 256, 256 >> > ( \
 				P, \
 				means2D, \
 				depths, \
@@ -765,6 +775,7 @@ void FORWARD::duplicate(int P,
 				rects2D, \
 				grid, \
 				visibilityMask)
+	#define CALL_DUPLICATE_EXTENDED(TBC, LB, SORT_ORDER) if (splatting_settings.foveated_rendering) {CALL_DUPLICATE_EXTENDED_2(TBC, LB, SORT_ORDER, true);} else {CALL_DUPLICATE_EXTENDED_2(TBC, LB, SORT_ORDER, false);}
 
 	#define CALL_DUPLICATE_SORT_ORDER(SORT_ORDER) \
 		if (splatting_settings.culling_settings.tile_based_culling) \

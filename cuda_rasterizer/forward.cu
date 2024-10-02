@@ -571,11 +571,12 @@ void FORWARD::render(
 	else if (splatting_settings.sort_settings.sort_mode == SortMode::HIERARCHICAL)
 	{
 		
-#define CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, FOVEATED, DEBUG) sortGaussiansRayHierarchicalCUDA_forward<NUM_CHANNELS, HEAD_QUEUE_SIZE, MID_QUEUE_SIZE, HIER_CULLING, FOVEATED, DEBUG><<<grid, {16, 4, 4}>>>( \
+#define CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, OP, FOVEATED, DEBUG) sortGaussiansRayHierarchicalCUDA_forward<NUM_CHANNELS, HEAD_QUEUE_SIZE, MID_QUEUE_SIZE, HIER_CULLING, OP, FOVEATED, DEBUG><<<grid, {16, 4, 4}>>>( \
 	ranges, range_lookup, point_list, W, H, means2D, cov3D_inv, projmatrix_inv, (float3 *)cam_pos, colors, conic_opacity, final_T, n_contrib, bg_color, debugVisualization.type, out_color, foveated_mask,focal_x, focal_y, partialprojmatrix_inv)
 
-#define CALL_HIER2(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, FOVEATED) if (debugVisualization.type == DebugVisualization::Disabled) { CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, FOVEATED, false); } else { CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, FOVEATED, true); }
-#define CALL_HIER(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE) if (splatting_settings.foveated_rendering) { CALL_HIER2(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, true); } else { CALL_HIER2(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, false); }
+#define CALL_HIER3(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, OP, FOVEATED) if (debugVisualization.type == DebugVisualization::Disabled) { CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, OP, FOVEATED, false); } else { CALL_HIER_DEBUG(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, OP, FOVEATED, true); }
+#define CALL_HIER2(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, OP) if (splatting_settings.foveated_rendering) { CALL_HIER3(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, OP, true); } else { CALL_HIER3(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, OP, false); }
+#define CALL_HIER(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE) if (splatting_settings.optimal_projection) { CALL_HIER2(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, true); } else { CALL_HIER2(HIER_CULLING, MID_QUEUE_SIZE, HEAD_QUEUE_SIZE, false); }
 
 #ifdef STOPTHEPOP_FASTBUILD
 #define CALL_HIER_HEAD(HIER_CULLING, MID_QUEUE_SIZE) \

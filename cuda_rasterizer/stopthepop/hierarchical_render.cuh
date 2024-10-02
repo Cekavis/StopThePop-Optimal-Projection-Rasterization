@@ -204,7 +204,7 @@ __device__ void batcherSort(CG& cg, KT* keys, VT* vals)
 #define DEBUG_HIERARCHICAL 0x0
 
 // MID_WINDOW needs to be pow2+4, minimum 8
-template <int HEAD_WINDOW, int MID_WINDOW, bool CULL_ALPHA, bool FOVEATED, typename PF, typename SF, typename BF, typename FF>
+template <int HEAD_WINDOW, int MID_WINDOW, bool CULL_ALPHA, bool OPTIMAL_PROJECTION, bool FOVEATED, typename PF, typename SF, typename BF, typename FF>
 __device__ void sortGaussiansRayHierarchicaEvaluation(
 	const uint2* __restrict__ ranges,
 	const uint32_t* __restrict__ range_lookup,
@@ -551,40 +551,47 @@ __device__ void sortGaussiansRayHierarchicaEvaluation(
 
 					blend_data.contributor++;
 
+					float2 d; 
 
-					// Compute the tangent plane coordinates of the 2D Gaussian mean.
-					glm::vec3 mu = pix2view(glm::vec2(xy.x, xy.y), W, H, inverse_p);
-
-					theta = atan2(-mu.y, sqrt(mu.x * mu.x + mu.z * mu.z)); 
-					phi = atan2(mu.x, mu.z);
-					
-					sin_phi = sin(phi);
-					cos_phi = cos(phi);
-
-					sin_theta = sin(theta);
-					cos_theta = cos(theta);
-
-					mu = {
-						cos_theta * sin_phi,
-						-sin_theta,
-						cos_theta * cos_phi
-					};
-
-					// Determine whether the Gaussian mean and the pixel ray are in the same hemisphere.
-					if (mu.x * t.x + mu.y * t.y + mu.z * t.z < 0.0000001f)  // 0.0000001f
+					if constexpr(OPTIMAL_PROJECTION)
 					{
-						continue;
+						glm::vec3 mu = pix2view(glm::vec2(xy.x, xy.y), W, H, inverse_p);
+
+						theta = atan2(-mu.y, sqrt(mu.x * mu.x + mu.z * mu.z)); 
+						phi = atan2(mu.x, mu.z);
+						
+						sin_phi = sin(phi);
+						cos_phi = cos(phi);
+
+						sin_theta = sin(theta);
+						cos_theta = cos(theta);
+
+						mu = {
+							cos_theta * sin_phi,
+							-sin_theta,
+							cos_theta * cos_phi
+						};
+
+						// Determine whether the Gaussian mean and the pixel ray are in the same hemisphere.
+						if (mu.x * t.x + mu.y * t.y + mu.z * t.z < 0.0000001f)  // 0.0000001f
+						{
+							continue;
+						}
+
+						float u_xy = 0.0f;
+						float v_xy = 0.0f;
+
+						float uv_pixf_inv = 1.f / (mu.x * t.x + mu.y * t.y + mu.z * t.z);
+
+						float u_pixf = fx * (t.x * cos_phi - t.z * sin_phi) * uv_pixf_inv;
+						float v_pixf = fy * (t.x * sin_phi * sin_theta + t.y * cos_theta + t.z * sin_theta * cos_phi) * uv_pixf_inv;
+
+						d = { u_xy - u_pixf, v_xy - v_pixf }; 						
 					}
-
-					float u_xy = 0.0f;
-					float v_xy = 0.0f;
-
-					float uv_pixf_inv = 1.f / (mu.x * t.x + mu.y * t.y + mu.z * t.z);
-
-					float u_pixf = fx * (t.x * cos_phi - t.z * sin_phi) * uv_pixf_inv;
-					float v_pixf = fy * (t.x * sin_phi * sin_theta + t.y * cos_theta + t.z * sin_theta * cos_phi) * uv_pixf_inv;
-
-					float2 d = { u_xy - u_pixf, v_xy - v_pixf }; 
+					else
+					{
+						d = { xy.x - static_cast<float>(pixpos.x), xy.y - static_cast<float>(pixpos.y) };
+					}
 
 					// float2 d = { xy.x - static_cast<float>(pixpos.x), xy.y - static_cast<float>(pixpos.y) };
 
@@ -836,13 +843,19 @@ __device__ void sortGaussiansRayHierarchicaEvaluation(
 						};
 
 						glm::vec2 max_pos;
-						float power = max_contrib_power_rect_gaussian_float_opimal_projection<3, 3>(in_conic_opacity, in_point_xy, tail_rect_min, tail_rect_max, W, H, fx, fy, inverse_p, max_pos);
+						float power;
+
+						if constexpr (OPTIMAL_PROJECTION)
+							power = max_contrib_power_rect_gaussian_float_opimal_projection<3, 3>(in_conic_opacity, in_point_xy, tail_rect_min, tail_rect_max, W, H, fx, fy, inverse_p, max_pos);
+						else
+							power = max_contrib_power_rect_gaussian_float<3, 3>(in_conic_opacity, in_point_xy, tail_rect_min, tail_rect_max, max_pos);
 
 						float alpha = min(0.99f, in_conic_opacity.w * exp(-power));
 						if (alpha < 1.0f / 255.0f)
 							halfs_culled_mask |= (0x1U << half);
 					}
-					else {
+					else
+					{
 						const glm::vec2 tail_rect_min = { 
 							static_cast<float>(bx * tile_min_multiply + (subtile_id & subtile) * BLOCK_X + 8 * xid), 
 							static_cast<float>(by * tile_min_multiply + (subtile_id>>1 & subtile) * BLOCK_Y + 8 * block.thread_index().z) 
@@ -853,7 +866,12 @@ __device__ void sortGaussiansRayHierarchicaEvaluation(
 						};
 
 						glm::vec2 max_pos;
-						float power = max_contrib_power_rect_gaussian_float_opimal_projection<7, 7>(in_conic_opacity, in_point_xy, tail_rect_min, tail_rect_max, W, H, fx, fy, inverse_p, max_pos);
+						float power;
+						
+						if constexpr(OPTIMAL_PROJECTION)
+							power = max_contrib_power_rect_gaussian_float_opimal_projection<7, 7>(in_conic_opacity, in_point_xy, tail_rect_min, tail_rect_max, W, H, fx, fy, inverse_p, max_pos);
+						else
+							power = max_contrib_power_rect_gaussian_float<7, 7>(in_conic_opacity, in_point_xy, tail_rect_min, tail_rect_max, max_pos);
 
 						float alpha = min(0.99f, in_conic_opacity.w * exp(-power));
 						if (alpha < 1.0f / 255.0f)
@@ -1057,7 +1075,7 @@ __device__ void sortGaussiansRayHierarchicaEvaluation(
 
 
 
-template <int32_t CHANNELS, int HEAD_WINDOW, int MID_WINDOW, bool CULL_ALPHA = true, bool FOVEATED = false, bool ENABLE_DEBUG_VIZ = false>
+template <int32_t CHANNELS, int HEAD_WINDOW, int MID_WINDOW, bool CULL_ALPHA = true, bool OPTIMAL_PROJECTION = false, bool FOVEATED = false, bool ENABLE_DEBUG_VIZ = false>
 __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_forward(
 	const uint2* __restrict__ ranges,
 	const uint32_t* __restrict__ range_lookup,
@@ -1182,7 +1200,7 @@ __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_forw
 			}
 		};
 
-	sortGaussiansRayHierarchicaEvaluation<HEAD_WINDOW, MID_WINDOW, CULL_ALPHA, FOVEATED>(
+	sortGaussiansRayHierarchicaEvaluation<HEAD_WINDOW, MID_WINDOW, CULL_ALPHA, OPTIMAL_PROJECTION, FOVEATED>(
 		ranges, range_lookup, point_list, W, H, points_xy_image, cov3Ds_inv, projmatrix_inv, cam_pos, conic_opacity, debugType,
 		prep_function, store_function, blend_function, fin_function, focal_x, focal_y, partialprojmatrix_inv);
 }
@@ -1429,7 +1447,7 @@ __global__ void __launch_bounds__(16 * 16) sortGaussiansRayHierarchicalCUDA_back
 			return;
 		};
 
-	sortGaussiansRayHierarchicaEvaluation<HEAD_WINDOW, MID_WINDOW, CULL_ALPHA, false>(
+	sortGaussiansRayHierarchicaEvaluation<HEAD_WINDOW, MID_WINDOW, CULL_ALPHA, false, false>(
 		ranges, nullptr, point_list, W, H, points_xy_image, cov3Ds_inv, projmatrix_inv, cam_pos, conic_opacity, DebugVisualization::Disabled,
 		prep_function, store_function, blend_function, fin_function, focal_x, focal_y, partialprojmatrix_inv);
 }

@@ -554,10 +554,13 @@ __global__ void duplicateWithKeys_extended(
 			}
 
 			const glm::vec2 tile_min(
-				x * FOVEATED ? BLOCK_X_32 : BLOCK_X, 
-				y * FOVEATED ? BLOCK_Y_32 : BLOCK_Y
+				x * (FOVEATED ? BLOCK_X_32 : BLOCK_X), 
+				y * (FOVEATED ? BLOCK_Y_32 : BLOCK_Y)
 			);
-			const glm::vec2 tile_max((x + 1) * FOVEATED ? BLOCK_X_32 : BLOCK_X - 1, (y + 1) * FOVEATED ? BLOCK_Y_32 : BLOCK_Y - 1);
+			const glm::vec2 tile_max(
+				(x + 1) * (FOVEATED ? BLOCK_X_32 : BLOCK_X) - 1,
+				(y + 1) * (FOVEATED ? BLOCK_Y_32 : BLOCK_Y) - 1
+			);
 
 			glm::vec2 max_pos;
 			float max_opac_factor = 0.0f;
